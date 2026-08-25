@@ -3,6 +3,7 @@ import type {
   DateInput,
   GateStatus,
   Phase,
+  Role,
   RiskLevel,
 } from './types';
 
@@ -11,12 +12,21 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export type GateBlocker =
   | 'CLAIM_ELEMENT_UNKNOWN'
   | 'CLAIM_ELEMENT_EVIDENCE_MISSING'
-  | 'LEGAL_STATUS_STALE';
+  | 'LEGAL_STATUS_STALE'
+  | 'IP_LEGAL_APPROVAL_REQUIRED'
+  | 'TEAM_LEAD_APPROVAL_REQUIRED'
+  | 'TEAM_LEAD_APPROVAL_ORDER_INVALID';
+
+export interface GateApproval {
+  role: Role;
+  approvedAt: DateInput;
+}
 
 export interface GateReadinessInput {
   claimElements: readonly ClaimElementCheck[];
   legalStatusCheckedAt?: DateInput;
   risks: readonly { level: RiskLevel }[];
+  approvals?: readonly GateApproval[];
   now: Date;
 }
 
@@ -55,12 +65,39 @@ export function assessGateReadiness(input: GateReadinessInput): GateReadiness {
     blockers.push('LEGAL_STATUS_STALE');
   }
 
+  if (input.risks.some((risk) => risk.level === 'CRITICAL' || risk.level === 'HIGH')) {
+    const approvals = input.approvals ?? [];
+    const legalApprovalTimes = approvals
+      .filter((approval) => approval.role === 'IP_LEGAL')
+      .map((approval) => new Date(approval.approvedAt).getTime())
+      .filter((time) => !Number.isNaN(time));
+    const teamLeadApprovalTimes = approvals
+      .filter((approval) => approval.role === 'TEAM_LEAD')
+      .map((approval) => new Date(approval.approvedAt).getTime())
+      .filter((time) => !Number.isNaN(time));
+
+    if (legalApprovalTimes.length === 0) {
+      blockers.push('IP_LEGAL_APPROVAL_REQUIRED');
+    }
+    if (teamLeadApprovalTimes.length === 0) {
+      blockers.push('TEAM_LEAD_APPROVAL_REQUIRED');
+    } else if (
+      legalApprovalTimes.length > 0 &&
+      !teamLeadApprovalTimes.some((teamLeadTime) =>
+        legalApprovalTimes.some((legalTime) => teamLeadTime > legalTime),
+      )
+    ) {
+      blockers.push('TEAM_LEAD_APPROVAL_ORDER_INVALID');
+    }
+  }
+
   return { canApprove: blockers.length === 0, blockers };
 }
 
 export type ConditionalApprovalBlocker =
   | 'RISK_LEVEL_NOT_ELIGIBLE'
   | 'CONDITION_DUE_DATE_OUT_OF_RANGE'
+  | 'CONDITION_RELEASE_MILESTONE_INVALID'
   | 'CONDITION_AFTER_RELEASE_MILESTONE';
 
 export interface ConditionalApprovalInput {
@@ -92,9 +129,12 @@ export function evaluateConditionalApproval(
   }
 
   const releaseDates = [input.productionDate, input.launchDate]
-    .filter((date): date is DateInput => Boolean(date))
-    .map((date) => new Date(date).getTime())
-    .filter((date) => !Number.isNaN(date));
+    .filter((date): date is DateInput => date !== undefined)
+    .map((date) => new Date(date).getTime());
+
+  if (releaseDates.some((date) => Number.isNaN(date))) {
+    return { allowed: false, blocker: 'CONDITION_RELEASE_MILESTONE_INVALID' };
+  }
 
   if (releaseDates.some((releaseDate) => dueTime > releaseDate)) {
     return { allowed: false, blocker: 'CONDITION_AFTER_RELEASE_MILESTONE' };

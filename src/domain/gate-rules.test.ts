@@ -60,6 +60,35 @@ describe('gate readiness', () => {
 
     expect(result).toEqual({ canApprove: true, blockers: [] });
   });
+
+  it('blocks HIGH-risk approval until IP legal and then team lead approvals are recorded', () => {
+    const result = assessGateReadiness({
+      claimElements: [{ status: 'PRESENT', evidenceIds: ['evidence-1'] }],
+      legalStatusCheckedAt: '2026-08-20T00:00:00.000Z',
+      risks: [{ level: 'HIGH' }],
+      approvals: [{ role: 'IP_LEGAL', approvedAt: '2026-08-20T09:00:00.000Z' }],
+      now,
+    });
+
+    expect(result.canApprove).toBe(false);
+    expect(result.blockers).toContain('TEAM_LEAD_APPROVAL_REQUIRED');
+  });
+
+  it('blocks HIGH-risk approval when team lead approval predates IP legal approval', () => {
+    const result = assessGateReadiness({
+      claimElements: [{ status: 'PRESENT', evidenceIds: ['evidence-1'] }],
+      legalStatusCheckedAt: '2026-08-20T00:00:00.000Z',
+      risks: [{ level: 'HIGH' }],
+      approvals: [
+        { role: 'IP_LEGAL', approvedAt: '2026-08-20T09:00:00.000Z' },
+        { role: 'TEAM_LEAD', approvedAt: '2026-08-20T08:00:00.000Z' },
+      ],
+      now,
+    });
+
+    expect(result.canApprove).toBe(false);
+    expect(result.blockers).toContain('TEAM_LEAD_APPROVAL_ORDER_INVALID');
+  });
 });
 
 describe('conditional approval', () => {
@@ -107,6 +136,17 @@ describe('conditional approval', () => {
     });
 
     expect(result).toEqual({ allowed: false, blocker: 'CONDITION_DUE_DATE_OUT_OF_RANGE' });
+  });
+
+  it('rejects a condition when a supplied production milestone is invalid', () => {
+    const result = evaluateConditionalApproval({
+      riskLevel: 'LOW',
+      dueDate: '2026-09-05T00:00:00.000Z',
+      productionDate: 'not-a-date',
+      now,
+    });
+
+    expect(result).toEqual({ allowed: false, blocker: 'CONDITION_RELEASE_MILESTONE_INVALID' });
   });
 });
 
