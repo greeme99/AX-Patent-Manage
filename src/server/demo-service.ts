@@ -396,7 +396,7 @@ export class DemoService {
       if (!claim) throw new ApiError('NOT_FOUND', 404, 'Claim element not found');
       if (claim.version !== body.version) this.conflict(claim);
       const updated = await repository.updateClaim(claim.id, claim.version, {
-        status: body.status, evidenceIds: body.evidenceIds, version: claim.version + 1, updatedAt: this.now(),
+        status: body.status, evidenceIds: claim.evidenceIds, version: claim.version + 1, updatedAt: this.now(),
       });
       if (!updated) this.conflict(claim);
       await this.audit(repository, session.id, 'CLAIM_UPDATED', 'claim_element', claim.id, claim, updated);
@@ -449,7 +449,15 @@ export class DemoService {
       if (approval.role !== 'IP_LEGAL' || approval.decision !== 'APPROVED' || gate.status !== 'IN_REVIEW') {
         throw new ApiError('GATE_TRANSITION_INVALID', 422, 'Conditional approval requires the active IP Legal review');
       }
-      const evaluation = evaluateConditionalApproval({ riskLevel: risk.level as RiskLevel, dueDate: body.dueDate, productionDate: project.productionDate ?? undefined, launchDate: project.launchDate ?? undefined, now: this.now() });
+      const elevatedOpenRisk = risks.find((value) =>
+        !['RESOLVED', 'CLOSED', 'CLEARED'].includes(value.status) &&
+        (value.level === 'CRITICAL' || value.level === 'HIGH'),
+      );
+      const evaluation = evaluateConditionalApproval({
+        riskLevel: (elevatedOpenRisk?.level ?? risk.level) as RiskLevel,
+        dueDate: body.dueDate, productionDate: project.productionDate ?? undefined,
+        launchDate: project.launchDate ?? undefined, now: this.now(),
+      });
       if (!evaluation.allowed) throw new ApiError('CONDITIONAL_APPROVAL_NOT_ALLOWED', 422, 'Conditional approval is not allowed', undefined, { blocker: evaluation.blocker });
       const condition = await repository.insertResource('conditions', session.id, {
         projectId: project.id, approvalId: approval.id, description: body.description, dueDate: body.dueDate,
@@ -533,6 +541,22 @@ export class DemoService {
       const phases: Phase[] = ['PLANNING', 'DESIGN', 'TEST', 'APPROVAL'];
       if (phases.indexOf(phase) !== phases.indexOf(project.phase as Phase) + 1) {
         throw new ApiError('PHASE_TRANSITION_INVALID', 422, 'Phase must start immediately after the current phase');
+      }
+      const previousPhase = phases[phases.indexOf(phase) - 1];
+      const previousGate = gates.find((gate) => gate.phase === previousPhase);
+      if (previousGate?.status === 'CONDITIONAL') {
+        const [conditions, approvals] = await Promise.all([
+          repository.listConditions(session.id, project.id),
+          repository.listApprovals(session.id, project.id, previousGate.id),
+        ]);
+        const previousApprovalIds = new Set(approvals.map((approval) => approval.id));
+        const hasActiveCondition = conditions.some((condition) =>
+          previousApprovalIds.has(condition.approvalId) &&
+          condition.status === 'OPEN' && new Date(condition.dueDate).getTime() > this.now().getTime(),
+        );
+        if (!hasActiveCondition) {
+          throw new ApiError('CONDITIONAL_APPROVAL_INVALID', 422, 'Conditional approval requires an active condition');
+        }
       }
       if (!canStartPhase(phase, gates as Parameters<typeof canStartPhase>[1])) {
         throw new ApiError('PREVIOUS_PHASE_NOT_APPROVED', 422, 'Previous phase must be approved');
@@ -619,6 +643,21 @@ export class DemoService {
   ): Promise<void> {
     const projectId = randomUUID();
     const revisionId = randomUUID();
+    const clonedClaims = syntheticFpcbProject.claimElements.map((element, index) => ({
+      id: randomUUID(), sessionId, projectId,
+      label: element.label || `Synthetic claim element ${index + 1}`,
+      status: element.status, evidenceIds: [] as string[],
+      version: 1, createdAt: now, updatedAt: now,
+    }));
+    const clonedEvidence = syntheticFpcbProject.evidence.map((item, index) => ({
+      id: randomUUID(), sessionId, projectId,
+      claimElementId: clonedClaims[index]?.id,
+      quote: item.quote, revision: Number(item.revision.replace(/\D/g, '')) || 1,
+      version: 1, createdAt: now, updatedAt: now,
+    }));
+    for (const [index, evidence] of clonedEvidence.entries()) {
+      if (clonedClaims[index]) clonedClaims[index].evidenceIds.push(evidence.id);
+    }
     await repository.insertSyntheticClone({
       project: {
         id: projectId, sessionId, code: syntheticFpcbProject.code,
@@ -637,13 +676,8 @@ export class DemoService {
         ),
         version: 1, createdAt: now, updatedAt: now,
       })),
-      claims: syntheticFpcbProject.claimElements.map((element, index) => ({
-        id: randomUUID(), sessionId, projectId,
-        label: element.label || `Synthetic claim element ${index + 1}`,
-        status: element.status,
-        evidenceIds: element.evidenceIds.map(() => randomUUID()),
-        version: 1, createdAt: now, updatedAt: now,
-      })),
+      claims: clonedClaims,
+      evidence: clonedEvidence,
       risks: syntheticFpcbProject.risks.map((risk) => ({
         id: randomUUID(), sessionId, projectId, level: risk.level, title: risk.title,
         status: 'OPEN', version: 1, createdAt: now, updatedAt: now,

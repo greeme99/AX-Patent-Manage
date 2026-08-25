@@ -10,18 +10,35 @@ interface ClaimChartProps {
   readOnly?: boolean;
 }
 
+interface EvidenceRow {
+  id: string;
+  claimElementId: string | null;
+  quote: string;
+  sourceUrl: string | null;
+  revision: number;
+}
+
 export function ClaimChart({ projectId = syntheticFpcbProject.id, readOnly = false }: ClaimChartProps) {
   const [elements, setElements] = useState(() => syntheticFpcbProject.claimElements.map((element, index) => ({
     ...element, id: `sample-${index}`, version: 1,
   })));
+  const [evidenceRows, setEvidenceRows] = useState<EvidenceRow[]>([]);
   const [notice, setNotice] = useState('');
   const patent = syntheticFpcbProject.patents[0];
 
   useEffect(() => {
     if (readOnly) return;
-    void fetch(`/api/projects/${projectId}/claim-charts`, { credentials: 'same-origin', cache: 'no-store' })
-      .then(async (response) => response.ok ? response.json() as Promise<{ data: typeof elements }> : Promise.reject())
-      .then((payload) => setElements(payload.data))
+    void Promise.all([
+      fetch(`/api/projects/${projectId}/claim-charts`, { credentials: 'same-origin', cache: 'no-store' }),
+      fetch(`/api/projects/${projectId}/evidence`, { credentials: 'same-origin', cache: 'no-store' }),
+    ])
+      .then(async ([claimsResponse, evidenceResponse]) => {
+        if (!claimsResponse.ok || !evidenceResponse.ok) throw new Error('failed');
+        const claims = await claimsResponse.json() as { data: typeof elements };
+        const evidence = await evidenceResponse.json() as { data: EvidenceRow[] };
+        setElements(claims.data);
+        setEvidenceRows(evidence.data);
+      })
       .catch(() => setNotice('Claim Chart를 불러오지 못했습니다.'));
   }, [projectId, readOnly]);
 
@@ -50,9 +67,10 @@ export function ClaimChart({ projectId = syntheticFpcbProject.id, readOnly = fal
         headers: { 'Content-Type': 'application/json', 'Idempotency-Key': globalThis.crypto.randomUUID() },
         body: JSON.stringify({ claimElementId: element.id, claimVersion: element.version, quote: 'R03 단면도에 따른 Micro-via 위치와 충전재 확인', revision: 3, version: 0 }),
       });
-      const payload = await response.json() as { data?: { claim: typeof element } };
+      const payload = await response.json() as { data?: { claim: typeof element; evidence: EvidenceRow } };
       if (!response.ok || !payload.data) throw new Error('failed');
       setElements((values) => values.map((value, itemIndex) => itemIndex === index ? payload.data!.claim : value));
+      setEvidenceRows((values) => [...values, payload.data!.evidence]);
       setNotice('근거가 Claim 요소에 연결되었습니다.');
     } catch { setNotice('근거 연결 실패 · 최신 데이터를 다시 확인하세요.'); }
   }
@@ -78,12 +96,13 @@ export function ClaimChart({ projectId = syntheticFpcbProject.id, readOnly = fal
           <thead><tr><th scope="col"># / 청구항 요소</th><th scope="col">우리 설계 {syntheticFpcbProject.currentRevisionLabel}</th><th scope="col">연결 근거</th><th scope="col">판정</th><th scope="col">위험·검토</th></tr></thead>
           <tbody>
             {elements.map((element, index) => {
-              const evidence = syntheticFpcbProject.evidence[index];
+              const evidence = evidenceRows.find((row) => row.claimElementId === element.id) ??
+                (element.id.startsWith('sample-') ? syntheticFpcbProject.evidence[index] : undefined);
               const status = statuses[index];
               return <tr key={element.label} className={status === 'UNKNOWN' ? 'claim-row--blocked' : ''}>
                 <th scope="row"><span className="element-index">E{index + 1}</span><strong>{element.label}</strong><p>{element.claimText}</p><small>원문 위치 · Claim 1, col. {4 + index}:{12 + index * 7}</small></th>
                 <td><strong>{element.designResponse}</strong><p>{index === 1 ? '차이점: 보강층 재질 및 굴곡부 배선 폭 단계가 상이함' : index === 2 ? '담당자 확인과 단면 근거 연결 필요' : '기능 대응 확인됨'}</p><span className="revision-chip">{syntheticFpcbProject.currentRevisionLabel}</span></td>
-                <td>{element.evidenceIds.length > 0 && evidence ? <div className="evidence-cell"><span className="file-mark">EV</span><div><strong>{evidence.label}</strong><p>“{evidence.quote}”</p><small>{evidence.source}</small></div></div> : <button className="missing-evidence" type="button" disabled={readOnly} onClick={() => void attachEvidence(index)}><span>＋</span><strong>근거 연결 필요</strong><small>도면 또는 시험 인용 추가</small></button>}</td>
+                <td>{element.evidenceIds.length > 0 && evidence ? <div className="evidence-cell"><span className="file-mark">EV</span><div><strong>{'label' in evidence ? evidence.label : `연결 근거 · R${evidence.revision}`}</strong><p>“{evidence.quote}”</p><small>{'source' in evidence ? evidence.source : evidence.sourceUrl ?? '저장된 설계 근거'}</small></div></div> : <button className="missing-evidence" type="button" disabled={readOnly} onClick={() => void attachEvidence(index)}><span>＋</span><strong>근거 연결 필요</strong><small>도면 또는 시험 인용 추가</small></button>}</td>
                 <td><label className={`claim-status claim-status--${status.toLowerCase()}`}><span>상태: {status}</span><select aria-label={`${element.label} 판정`} value={status} disabled={readOnly} onChange={(event) => void updateStatus(index, event.target.value as ClaimElementStatus)}>{CLAIM_ELEMENT_STATUSES.map((value) => <option key={value}>{value}</option>)}</select></label><small>{status === 'UNKNOWN' ? '최종 승인 차단' : status === 'PARTIAL' ? '법무 검토 필요' : '근거 확인 완료'}</small></td>
                 <td><span className={status === 'UNKNOWN' ? 'risk-chip' : index === 1 ? 'risk-chip risk-chip--medium' : 'status-badge'}>{status === 'UNKNOWN' ? 'HIGH' : index === 1 ? 'MEDIUM' : 'LOW'}</span><p>{status === 'UNKNOWN' ? '담당: 실무자' : '담당: IP·법무'}</p><button type="button">검토 메모 {index + 1}</button></td>
               </tr>;

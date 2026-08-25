@@ -52,6 +52,23 @@ describe('DemoService integration', () => {
     });
   });
 
+  it('persists seeded evidence with the Claim element that references it', async () => {
+    const opened = await service.openSession();
+    const project = (await service.listProjects(opened.cookie))[0];
+    const claims = await service.listResource(opened.cookie, 'claim-charts', project.id) as {
+      id: string; evidenceIds: string[];
+    }[];
+    const evidence = await service.listResource(opened.cookie, 'evidence', project.id) as {
+      id: string; claimElementId: string | null; quote: string;
+    }[];
+
+    expect(evidence).toHaveLength(2);
+    expect(evidence[0].quote).toContain('0.42 mm');
+    expect(claims.some((claim) => evidence.some((item) =>
+      item.claimElementId === claim.id && claim.evidenceIds.includes(item.id),
+    ))).toBe(true);
+  });
+
   it('marks production session and bootstrap cookies Secure', async () => {
     const production = new DemoService(new DrizzleDemoRepository(database), {
       secret: 'integration-test-secret-at-least-32-characters',
@@ -511,6 +528,7 @@ describe('DemoService integration', () => {
     const mediumRisk = (await database.db.select().from(risks)).find(
       (value) => value.sessionId === opened.session.id && value.level === 'MEDIUM',
     )!;
+    await database.db.update(risks).set({ status: 'RESOLVED' }).where(eq(risks.level, 'HIGH'));
     await database.db.update(claimElements).set({ status: 'ABSENT', evidenceIds: [] });
     await service.switchRole(opened.cookie, { role: 'IP_LEGAL', version: 1 }, 'legal-conditional');
     const approval = await service.createApproval(opened.cookie, {
@@ -523,6 +541,66 @@ describe('DemoService integration', () => {
       version: approval.data.gateVersion,
     }, 'conditional-medium');
     expect(conditional.data.gateStatus).toBe('CONDITIONAL');
+  });
+
+  it('rejects a medium-risk conditional approval while the seeded HIGH risk remains unresolved', async () => {
+    const opened = await service.openSession();
+    const project = (await service.listProjects(opened.cookie))[0];
+    const gate = (await database.db.select().from(phaseGates)).find((value) => value.sessionId === opened.session.id && value.phase === 'DESIGN')!;
+    const mediumRisk = (await database.db.select().from(risks)).find(
+      (value) => value.sessionId === opened.session.id && value.level === 'MEDIUM',
+    )!;
+    await database.db.update(claimElements).set({ status: 'ABSENT', evidenceIds: [] });
+    await service.switchRole(opened.cookie, { role: 'IP_LEGAL', version: 1 }, 'legal-with-open-high-risk');
+    const approval = await service.createApproval(opened.cookie, {
+      projectId: project.id, gateId: gate.id, decision: 'APPROVED', version: gate.version,
+    }, 'legal-before-rejected-condition');
+
+    await expect(service.createConditionalApproval(opened.cookie, {
+      projectId: project.id, gateId: gate.id, approvalId: approval.data.approval.id,
+      riskId: mediumRisk.id, dueDate: '2026-09-18T00:00:00.000Z', description: 'Micro-via 보강 시험 완료',
+      version: approval.data.gateVersion,
+    }, 'medium-cannot-bypass-high')).rejects.toMatchObject({
+      code: 'CONDITIONAL_APPROVAL_NOT_ALLOWED', status: 422,
+      details: { blocker: 'RISK_LEVEL_NOT_ELIGIBLE' },
+    });
+  });
+
+  it('preserves server-owned claim evidence when a status PATCH supplies arbitrary ids', async () => {
+    const opened = await service.openSession();
+    const project = (await service.listProjects(opened.cookie))[0];
+    const claim = (await database.db.select().from(claimElements)).find(
+      (value) => value.sessionId === opened.session.id && value.status === 'UNKNOWN',
+    )!;
+
+    const updated = await service.updateClaim(opened.cookie, {
+      projectId: project.id, claimElementId: claim.id, status: 'PRESENT', evidenceIds: [randomUUID()], version: claim.version,
+    }, 'claim-status-cannot-inject-evidence');
+
+    expect(updated.data).toMatchObject({ status: 'PRESENT', evidenceIds: [] });
+  });
+
+  it('starts TEST after a valid unexpired DESIGN conditional approval', async () => {
+    const opened = await service.openSession();
+    const project = (await service.listProjects(opened.cookie))[0];
+    const gate = (await database.db.select().from(phaseGates)).find((value) => value.sessionId === opened.session.id && value.phase === 'DESIGN')!;
+    const mediumRisk = (await database.db.select().from(risks)).find(
+      (value) => value.sessionId === opened.session.id && value.level === 'MEDIUM',
+    )!;
+    await database.db.update(risks).set({ status: 'RESOLVED' }).where(eq(risks.level, 'HIGH'));
+    await database.db.update(claimElements).set({ status: 'ABSENT', evidenceIds: [] });
+    await service.switchRole(opened.cookie, { role: 'IP_LEGAL', version: 1 }, 'legal-conditional-to-test');
+    const approval = await service.createApproval(opened.cookie, {
+      projectId: project.id, gateId: gate.id, decision: 'APPROVED', version: gate.version,
+    }, 'legal-before-test-condition');
+    await service.createConditionalApproval(opened.cookie, {
+      projectId: project.id, gateId: gate.id, approvalId: approval.data.approval.id,
+      riskId: mediumRisk.id, dueDate: '2026-09-18T00:00:00.000Z', description: 'Micro-via 보강 시험 완료',
+      version: approval.data.gateVersion,
+    }, 'condition-before-test');
+
+    const started = await service.startPhase(opened.cookie, project.id, 'TEST', { version: project.version }, 'start-test-after-condition');
+    expect(started.data).toMatchObject({ phase: 'TEST', startedGate: { phase: 'TEST', status: 'READY_FOR_REVIEW' } });
   });
 
   it('increments the project version when revision impact stales its linked gates', async () => {

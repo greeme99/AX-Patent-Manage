@@ -170,5 +170,7 @@ export function canStartPhase(
   if (phaseIndex === 0) return true;
 
   const previousPhase = phaseOrder[phaseIndex - 1];
-  return gates.some((gate) => gate.phase === previousPhase && gate.status === 'APPROVED');
+  return gates.some((gate) =>
+    gate.phase === previousPhase && (gate.status === 'APPROVED' || gate.status === 'CONDITIONAL'),
+  );
 }

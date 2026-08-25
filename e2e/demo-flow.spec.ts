@@ -72,8 +72,11 @@ test('completes the persisted claim-to-approval snapshot flow', async ({ page })
   await page.goto(`/projects/${project.id}/claim-chart`);
   await page.getByLabel('요소 3 · 수지 충전 Micro-via 판정').selectOption('ABSENT');
   await expect(page.getByText('판정이 저장되었습니다.')).toBeVisible();
-  await page.getByRole('button', { name: '근거 연결 필요' }).click();
+  await page.getByRole('row', { name: /요소 3 · 수지 충전 Micro-via/ })
+    .getByRole('button', { name: '근거 연결 필요' }).click();
   await expect(page.getByText('근거가 Claim 요소에 연결되었습니다.')).toBeVisible();
+  await page.reload();
+  await expect(page.getByText('R03 단면도에 따른 Micro-via 위치와 충전재 확인')).toBeVisible();
   const claims = (await api(`/api/projects/${project.id}/claim-charts`)).data as {
     data: { status: string; evidenceIds: string[] }[];
   };
