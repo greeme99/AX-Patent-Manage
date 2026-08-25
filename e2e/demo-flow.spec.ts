@@ -5,12 +5,18 @@ test('desktop demo covers role cockpits, project phases, detail views, and appro
   await expect(page.getByRole('heading', { name: '실무 담당자 Cockpit' })).toBeVisible();
 
   const roles = page.getByRole('combobox', { name: '데모 역할 전환' });
+  await roles.selectOption('RESPONSIBLE');
+  await expect(page.getByRole('heading', { name: '과제 책임자 Cockpit' })).toBeVisible();
+  await expect(page.getByText('설계 Gate 검토 요청', { exact: true })).toBeVisible();
   await roles.selectOption('TEAM_LEAD');
   await expect(page.getByRole('heading', { name: '개발팀장 Cockpit' })).toBeVisible();
   await expect(page.getByText('IP·법무 선행 승인 대기', { exact: true })).toBeVisible();
   await roles.selectOption('IP_LEGAL');
   await expect(page.getByRole('heading', { name: 'IP·법무 Cockpit' })).toBeVisible();
   await expect(page.getByText('HIGH 위험 법무 검토', { exact: true })).toBeVisible();
+  await roles.selectOption('QA');
+  await expect(page.getByRole('heading', { name: 'QA Cockpit' })).toBeVisible();
+  await expect(page.getByText('시험 증거 추적성 점검', { exact: true })).toBeVisible();
 
   await page.getByRole('link', { name: /프로젝트 열기/ }).click();
   await expect(page.getByRole('heading', { name: 'EV 배터리 관리 모듈용 고굴곡 FPCB' })).toBeVisible();

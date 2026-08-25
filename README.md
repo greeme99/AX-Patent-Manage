@@ -9,11 +9,11 @@ npm ci
 npm run dev
 ```
 
-검증 명령은 `npm test`, `npm run test:e2e`, `npm run typecheck`, `npm run lint`, `npm run build`이며, `npm run check`은 단위/통합 테스트·타입·린트를 함께 실행합니다.
+검증 명령은 `npm test`, `npm run test:e2e`, `npm run typecheck`, `npm run lint`, `npm run build`이며, `npm run test:e2e`는 fresh checkout에서도 production build 후 E2E를 실행합니다. CI는 build 다음에 `npm run test:e2e:ci`를 사용해 build를 반복하지 않습니다. `npm run check`은 단위/통합 테스트·타입·린트를 함께 실행합니다.
 
 ## 데모 흐름
 
-1. Cockpit에서 `개발팀장`, `IP·법무` 역할을 전환해 각 업무 큐를 확인합니다.
+1. Cockpit에서 `과제 책임자`, `개발팀장`, `IP·법무`, `QA` 역할을 전환해 각 업무 큐를 확인합니다.
 2. `프로젝트 열기`에서 기획 → 설계 → 시험 → 승인 네 단계 Gate를 이동합니다.
 3. Claim Chart와 Revision 영향을 열어 차단 요소와 재검토 Gate를 확인합니다.
 4. 승인 화면의 승인 체인과 교육용 워터마크를 확인합니다.
