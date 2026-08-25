@@ -452,7 +452,7 @@ export class DemoService {
       })),
       claims: syntheticFpcbProject.claimElements.map((element, index) => ({
         id: randomUUID(), sessionId, projectId,
-        label: `Synthetic claim element ${index + 1}`,
+        label: element.label || `Synthetic claim element ${index + 1}`,
         status: element.status,
         evidenceIds: element.evidenceIds.map(() => randomUUID()),
         version: 1, createdAt: now, updatedAt: now,

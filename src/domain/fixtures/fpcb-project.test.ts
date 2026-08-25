@@ -18,4 +18,12 @@ describe('synthetic FPCB fixture', () => {
     expect(new Set(ids)).toHaveLength(11);
     for (const id of ids) expect(id).toMatch(uuidPattern);
   });
+
+  it('provides the single UI source for jurisdictions, features, patents, and evidence', () => {
+    expect(syntheticFpcbProject.jurisdictions).toEqual(['KR', 'US', 'EP', 'PCT']);
+    expect(syntheticFpcbProject.features).toHaveLength(4);
+    expect(syntheticFpcbProject.patents.map((patent) => patent.publicationNumber)).toContain('KR102345678B1');
+    expect(syntheticFpcbProject.evidence).toHaveLength(2);
+    expect(syntheticFpcbProject.claimElements.every((element) => element.label.length > 0)).toBe(true);
+  });
 });
