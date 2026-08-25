@@ -25,6 +25,7 @@ import type {
   ApprovalRecord,
   AuditInsert,
   ClaimRecord,
+  ConditionRecord,
   DemoRepository,
   GateRecord,
   IdempotencyInsert,
@@ -110,6 +111,7 @@ export class DrizzleDemoRepository implements DemoRepository {
     await this.query.insert(projects).values(value.project);
     await this.query.insert(phaseGates).values(value.gates);
     await this.query.insert(claimElements).values(value.claims);
+    await this.query.insert(evidence).values(value.evidence);
     await this.query.insert(risks).values(value.risks);
   }
 
@@ -201,6 +203,12 @@ export class DrizzleDemoRepository implements DemoRepository {
   listRisks(sessionId: string, projectId: string): Promise<RiskRecord[]> {
     return this.query.select().from(risks).where(and(
       eq(risks.sessionId, sessionId), eq(risks.projectId, projectId),
+    ));
+  }
+
+  listConditions(sessionId: string, projectId: string): Promise<ConditionRecord[]> {
+    return this.query.select().from(conditions).where(and(
+      eq(conditions.sessionId, sessionId), eq(conditions.projectId, projectId),
     ));
   }
 

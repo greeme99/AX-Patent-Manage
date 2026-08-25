@@ -76,3 +76,16 @@ No KIPRIS/EPO/Gemini integrations, uploads, real auth, paid APIs, or PDF/ZIP pac
 - All mutation commands retain route-scoped idempotency and optimistic-version checks; Claim evidence, conditional state, phase start, and revision impact are transaction/audit operations.
 - PDF/ZIP and live KIPRIS/EPO/Gemini remain intentionally deferred.
 - The temporary production server is left running for the requested Chrome preview; it uses only `/tmp/patent-gate-e2e.db` and a test-only secret.
+
+### Fix round 1
+
+- **Conditional risk aggregation**: `createConditionalApproval` now evaluates every unresolved project risk. An unresolved HIGH/CRITICAL makes a selected MEDIUM risk ineligible; `src/server/demo-service.test.ts` covers the seeded HIGH-risk bypass attempt. The existing medium-success case now explicitly resolves HIGH first.
+- **Claim evidence ownership**: status PATCH keeps the server-owned `evidenceIds`; only the atomic evidence-link command can append an ID. The integration test verifies an arbitrary UUID cannot make a PRESENT Claim evidence-backed.
+- **Conditional progression**: `canStartPhase` recognizes `CONDITIONAL`; the service additionally proves the predecessor condition belongs to its approval, is `OPEN`, and has not expired before starting the next phase. Integration coverage performs DESIGN conditional approval then starts TEST.
+- **Persisted Claim evidence display**: synthetic clone creation persists the fixture evidence rows and associates their generated IDs with claims. Claim Chart fetches evidence rows, renders by `claimElementId`, and updates its evidence state after linking. Production Playwright reloads the page and verifies the saved quote remains visible.
+
+**RED/GREEN:** focused `npm test -- src/server/demo-service.test.ts` first failed for the elevated-risk bypass, arbitrary Claim IDs, conditional-phase dead-end, and missing persisted fixture evidence; after the minimal implementation it passed **25/25**.
+
+**Verification:** `npm test` passed **78/78**; `npm run typecheck` and `npm run lint` emitted no diagnostics; clean `CI=true npm run build` produced `BUILD_ID`; `npm run test:e2e:ci` passed **3/3** production Playwright tests.
+
+**Concern:** Live KIPRIS/EPO/Gemini and PDF/ZIP remain deliberately deferred; no preview server is left running.

@@ -2,7 +2,9 @@ import type {
   approvals,
   auditEvents,
   claimElements,
+  conditions,
   demoSessions,
+  evidence,
   idempotencyRecords,
   phaseGates,
   projects,
@@ -21,6 +23,8 @@ export type RiskRecord = typeof risks.$inferSelect;
 export type RiskInsert = typeof risks.$inferInsert;
 export type ApprovalRecord = typeof approvals.$inferSelect;
 export type ApprovalInsert = typeof approvals.$inferInsert;
+export type ConditionRecord = typeof conditions.$inferSelect;
+export type EvidenceInsert = typeof evidence.$inferInsert;
 export type AuditInsert = typeof auditEvents.$inferInsert;
 export type IdempotencyInsert = typeof idempotencyRecords.$inferInsert;
 
@@ -42,6 +46,7 @@ export interface SyntheticCloneInsert {
   project: ProjectInsert;
   gates: GateInsert[];
   claims: ClaimInsert[];
+  evidence: EvidenceInsert[];
   risks: RiskInsert[];
 }
 
@@ -76,6 +81,7 @@ export interface DemoRepository {
     status: string; evidenceIds: string[]; version: number; updatedAt: Date;
   }): Promise<ClaimRecord | null>;
   listRisks(sessionId: string, projectId: string): Promise<RiskRecord[]>;
+  listConditions(sessionId: string, projectId: string): Promise<ConditionRecord[]>;
   listApprovals(sessionId: string, projectId?: string, gateId?: string): Promise<ApprovalRecord[]>;
   insertApproval(value: ApprovalInsert): Promise<ApprovalRecord>;
   listResource(resource: ResourceName, sessionId: string, projectId?: string): Promise<unknown[]>;
