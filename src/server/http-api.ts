@@ -122,9 +122,17 @@ export function createHttpApi(service: DemoService) {
 
   return {
     demoSession: (request: Request) => respond(async () => {
-      const existing = request.headers.get('cookie') ?? undefined;
-      const result = await service.openSession(existing);
-      return json({ session: result.session, demoAuth: result.demoAuth }, 200, { 'set-cookie': result.cookie });
+      if (request.method === 'GET') {
+        return json(await service.readSession(request.headers.get('cookie') ?? undefined));
+      }
+      const key = idempotencyKey(request);
+      await body(request, z.object({ version: z.literal(0) }).strict());
+      const result = await service.createDemoSession(key);
+      return json(
+        { session: result.session, demoAuth: result.demoAuth },
+        201,
+        { 'set-cookie': result.cookie },
+      );
     }),
 
     demoReset: (request: Request) => respond(async () => {

@@ -2,10 +2,12 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { eq } from 'drizzle-orm';
 
 import { createDatabase, type AppDatabase } from './db/client';
-import { auditEvents, demoSessions, phaseGates } from './db/schema';
+import { approvals, auditEvents, claimElements, demoSessions, phaseGates, projects } from './db/schema';
 import { ApiError, DemoService } from './demo-service';
+import { DrizzleDemoRepository } from './drizzle-demo-repository';
 
 const NOW = new Date('2026-08-25T03:00:00.000Z');
 
@@ -18,7 +20,7 @@ describe('DemoService integration', () => {
     directory = await mkdtemp(join(tmpdir(), 'patent-gate-'));
     database = createDatabase({ url: `file:${join(directory, 'test.db')}` });
     await database.initialize();
-    service = new DemoService(database, {
+    service = new DemoService(new DrizzleDemoRepository(database), {
       secret: 'integration-test-secret-at-least-32-characters',
       now: () => NOW,
     });
@@ -65,7 +67,7 @@ describe('DemoService integration', () => {
 
   it('rejects a lazily discovered expired session', async () => {
     const opened = await service.openSession();
-    const expiredService = new DemoService(database, {
+    const expiredService = new DemoService(new DrizzleDemoRepository(database), {
       secret: 'integration-test-secret-at-least-32-characters',
       now: () => new Date('2026-08-26T03:00:00.001Z'),
     });
@@ -124,6 +126,7 @@ describe('DemoService integration', () => {
   it('requires IP Legal approval before Team Lead for elevated risk', async () => {
     const opened = await service.openSession();
     const project = (await service.listProjects(opened.cookie))[0];
+    await database.db.update(claimElements).set({ status: 'ABSENT', evidenceIds: [] });
     const gate = (await database.db.select().from(phaseGates)).find(
       (candidate) => candidate.sessionId === opened.session.id && candidate.phase === 'DESIGN',
     );
@@ -187,6 +190,72 @@ describe('DemoService integration', () => {
     )?.status).toBe('APPROVED');
   });
 
+  it('rejects IP Legal approval when the seeded claim chart contains UNKNOWN', async () => {
+    const opened = await service.openSession();
+    const project = (await service.listProjects(opened.cookie))[0];
+    const gate = (await database.db.select().from(phaseGates)).find(
+      (candidate) => candidate.sessionId === opened.session.id && candidate.phase === 'DESIGN',
+    )!;
+    await service.switchRole(opened.cookie, { role: 'IP_LEGAL', version: 1 }, 'legal-role');
+
+    await expect(service.createApproval(opened.cookie, {
+      gateId: gate.id,
+      projectId: project.id,
+      decision: 'APPROVED',
+      version: gate.version,
+    }, 'blocked-unknown')).rejects.toMatchObject({
+      code: 'GATE_NOT_READY',
+      status: 422,
+      details: { blockers: expect.arrayContaining(['CLAIM_ELEMENT_UNKNOWN']) },
+    });
+    expect(await database.db.select().from(approvals)).toHaveLength(0);
+  });
+
+  it('rejects IP Legal approval when required claim evidence is missing', async () => {
+    const opened = await service.openSession();
+    const project = (await service.listProjects(opened.cookie))[0];
+    const gate = (await database.db.select().from(phaseGates)).find(
+      (candidate) => candidate.sessionId === opened.session.id && candidate.phase === 'DESIGN',
+    )!;
+    await database.db.update(claimElements).set({ status: 'ABSENT', evidenceIds: [] });
+    const [claim] = await database.db.select().from(claimElements);
+    await database.db.update(claimElements).set({ status: 'PRESENT', evidenceIds: [] })
+      .where(eq(claimElements.id, claim.id));
+    await service.switchRole(opened.cookie, { role: 'IP_LEGAL', version: 1 }, 'legal-role');
+
+    await expect(service.createApproval(opened.cookie, {
+      gateId: gate.id,
+      projectId: project.id,
+      decision: 'APPROVED',
+      version: gate.version,
+    }, 'blocked-evidence')).rejects.toMatchObject({
+      code: 'GATE_NOT_READY',
+      details: { blockers: expect.arrayContaining(['CLAIM_ELEMENT_EVIDENCE_MISSING']) },
+    });
+  });
+
+  it('rejects IP Legal approval when the legal status check is stale', async () => {
+    const opened = await service.openSession();
+    const project = (await service.listProjects(opened.cookie))[0];
+    const gate = (await database.db.select().from(phaseGates)).find(
+      (candidate) => candidate.sessionId === opened.session.id && candidate.phase === 'DESIGN',
+    )!;
+    await database.db.update(claimElements).set({ status: 'ABSENT', evidenceIds: [] });
+    await database.db.update(projects).set({ legalStatusCheckedAt: '2026-08-01T00:00:00.000Z' })
+      .where(eq(projects.id, project.id));
+    await service.switchRole(opened.cookie, { role: 'IP_LEGAL', version: 1 }, 'legal-role');
+
+    await expect(service.createApproval(opened.cookie, {
+      gateId: gate.id,
+      projectId: project.id,
+      decision: 'APPROVED',
+      version: gate.version,
+    }, 'blocked-legal-status')).rejects.toMatchObject({
+      code: 'GATE_NOT_READY',
+      details: { blockers: expect.arrayContaining(['LEGAL_STATUS_STALE']) },
+    });
+  });
+
   it('makes an IP Legal rejection final and enforces sequential phases', async () => {
     const opened = await service.openSession();
     const project = (await service.listProjects(opened.cookie))[0];
@@ -232,6 +301,53 @@ describe('DemoService integration', () => {
     await expect(
       service.startPhase(opened.cookie, project.id, 'TEST', { version: project.version }, 'start-test'),
     ).rejects.toMatchObject({ code: 'PREVIOUS_PHASE_NOT_APPROVED', status: 422 });
+  });
+
+  it('makes an IP Legal rejection terminal for later IP Legal decisions', async () => {
+    const opened = await service.openSession();
+    const project = (await service.listProjects(opened.cookie))[0];
+    const gate = (await database.db.select().from(phaseGates)).find(
+      (candidate) => candidate.sessionId === opened.session.id && candidate.phase === 'DESIGN',
+    )!;
+    await service.switchRole(opened.cookie, { role: 'IP_LEGAL', version: 1 }, 'legal-role');
+    const rejected = await service.createApproval(opened.cookie, {
+      gateId: gate.id,
+      projectId: project.id,
+      decision: 'REJECTED',
+      reason: 'terminal legal decision',
+      version: gate.version,
+    }, 'first-rejection');
+
+    await expect(service.createApproval(opened.cookie, {
+      gateId: gate.id,
+      projectId: project.id,
+      decision: 'APPROVED',
+      version: rejected.data.gateVersion,
+    }, 'later-legal-decision')).rejects.toMatchObject({
+      code: 'LEGAL_REJECTION_FINAL',
+      status: 422,
+    });
+    expect(await database.db.select().from(approvals)).toHaveLength(1);
+  });
+
+  it('scopes the same approval idempotency key to its target gate', async () => {
+    const opened = await service.openSession();
+    const project = (await service.listProjects(opened.cookie))[0];
+    const gates = (await database.db.select().from(phaseGates)).filter(
+      (candidate) => candidate.sessionId === opened.session.id,
+    );
+    await database.db.update(claimElements).set({ status: 'ABSENT', evidenceIds: [] });
+    await service.switchRole(opened.cookie, { role: 'IP_LEGAL', version: 1 }, 'legal-role');
+    const first = await service.createApproval(opened.cookie, {
+      gateId: gates[1].id, projectId: project.id, decision: 'APPROVED', version: gates[1].version,
+    }, 'shared-approval-key');
+    const second = await service.createApproval(opened.cookie, {
+      gateId: gates[2].id, projectId: project.id, decision: 'APPROVED', version: gates[2].version,
+    }, 'shared-approval-key');
+
+    expect(first.data.approval.gateId).toBe(gates[1].id);
+    expect(second.data.approval.gateId).toBe(gates[2].id);
+    expect(await database.db.select().from(approvals)).toHaveLength(2);
   });
 
   it('marks revision-linked gates stale once and audits the impact', async () => {
