@@ -16,8 +16,13 @@ export interface AppDatabase {
 }
 
 export function createDatabase(config: DatabaseConfig = {}): AppDatabase {
-  const url = config.url ?? process.env.DATABASE_URL ?? 'file:local.db';
-  const authToken = config.authToken ?? process.env.TURSO_AUTH_TOKEN;
+  const configuredUrl = config.url ?? process.env.DATABASE_URL;
+  const configuredToken = config.authToken ?? process.env.TURSO_AUTH_TOKEN;
+  if (process.env.NODE_ENV === 'production' && (!configuredUrl || !configuredToken)) {
+    throw new Error('DATABASE_URL and TURSO_AUTH_TOKEN are required for writable production state');
+  }
+  const url = configuredUrl ?? 'file:local.db';
+  const authToken = configuredToken;
   const client = createClient({ url, ...(authToken ? { authToken } : {}) });
   const db = drizzle(client, { schema });
 

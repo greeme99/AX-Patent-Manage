@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray, lt } from 'drizzle-orm';
 
 import type { AppDatabase } from './db/client';
 import {
@@ -80,6 +80,30 @@ export class DrizzleDemoRepository implements DemoRepository {
       role, version: expectedVersion + 1, updatedAt: now,
     }).where(and(eq(demoSessions.id, id), eq(demoSessions.version, expectedVersion))).returning();
     return record ?? null;
+  }
+
+  async deleteExpiredSessions(now: Date): Promise<number> {
+    const expired = await this.query.select({ id: demoSessions.id }).from(demoSessions)
+      .where(lt(demoSessions.expiresAt, now));
+    const sessionIds = expired.map((session) => session.id);
+    if (sessionIds.length === 0) return 0;
+
+    await this.query.delete(approvals).where(inArray(approvals.sessionId, sessionIds));
+    await this.query.delete(auditEvents).where(inArray(auditEvents.sessionId, sessionIds));
+    await this.query.delete(claimElements).where(inArray(claimElements.sessionId, sessionIds));
+    await this.query.delete(conditions).where(inArray(conditions.sessionId, sessionIds));
+    await this.query.delete(evidence).where(inArray(evidence.sessionId, sessionIds));
+    await this.query.delete(features).where(inArray(features.sessionId, sessionIds));
+    await this.query.delete(idempotencyRecords).where(inArray(idempotencyRecords.sessionId, sessionIds));
+    await this.query.delete(jobs).where(inArray(jobs.sessionId, sessionIds));
+    await this.query.delete(notifications).where(inArray(notifications.sessionId, sessionIds));
+    await this.query.delete(patents).where(inArray(patents.sessionId, sessionIds));
+    await this.query.delete(phaseGates).where(inArray(phaseGates.sessionId, sessionIds));
+    await this.query.delete(projects).where(inArray(projects.sessionId, sessionIds));
+    await this.query.delete(risks).where(inArray(risks.sessionId, sessionIds));
+    await this.query.delete(searchRuns).where(inArray(searchRuns.sessionId, sessionIds));
+    await this.query.delete(demoSessions).where(inArray(demoSessions.id, sessionIds));
+    return sessionIds.length;
   }
 
   async insertSyntheticClone(value: SyntheticCloneInsert): Promise<void> {

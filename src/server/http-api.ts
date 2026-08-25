@@ -235,7 +235,29 @@ export function createHttpApi(service: DemoService) {
       ));
     }),
 
-    health: async () => json({ status: 'ok', demoAuth: true }),
+    approvalPackage: (request: Request, projectId: string) => respond(async () => {
+      const manifest = await service.createApprovalPackage(cookie(request), projectId);
+      return json(manifest, 200, {
+        'content-disposition': `attachment; filename="${manifest.project.code}-approval-snapshot.json"`,
+      });
+    }),
+
+    cleanupExpiredSessions: (request: Request) => respond(async () => {
+      const secret = process.env.CRON_SECRET;
+      if (!secret && process.env.NODE_ENV === 'production') {
+        throw new ApiError('CRON_SECRET_REQUIRED', 503, 'CRON_SECRET is required in production');
+      }
+      if (secret && request.headers.get('authorization') !== `Bearer ${secret}`) {
+        throw new ApiError('CRON_UNAUTHORIZED', 401, 'Cron authorization is required');
+      }
+      return json(await service.cleanupExpiredSessions());
+    }),
+
+    health: async () => json({
+      status: 'ok',
+      demoAuth: true,
+      connectors: { patentSearch: 'SAMPLE', aiReview: 'SAMPLE' },
+    }),
 
     notImplementedUntilTask4: async () => json({
       error: {

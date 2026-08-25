@@ -349,14 +349,19 @@ describe('HTTP API contract', () => {
     expect(await database.db.select().from(features)).toHaveLength(2);
   });
 
-  it('returns a typed Task 4 placeholder for approval packages', async () => {
-    const response = await api.notImplementedUntilTask4();
-    expect(response.status).toBe(501);
-    expect(await response.json()).toEqual({
-      error: {
-        code: 'NOT_IMPLEMENTED_UNTIL_TASK_4',
-        message: 'This connector-heavy contract is implemented in Task 4',
-      },
+  it('downloads the synthetic project approval snapshot manifest as JSON', async () => {
+    const projectResponse = await api.projects(new Request('http://demo.test/api/projects', { headers: { cookie } }));
+    const project = (await projectResponse.json()).data[0];
+    const response = await api.approvalPackage(new Request(
+      `http://demo.test/api/projects/${project.id}/approval-package`, { headers: { cookie } },
+    ), project.id);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('application/json');
+    expect(response.headers.get('content-disposition')).toContain('FPCB-EV-BMS-001-approval-snapshot.json');
+    expect(await response.json()).toMatchObject({
+      watermark: '교육용 데모 — 법적 전자서명 아님',
+      sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
   });
 });

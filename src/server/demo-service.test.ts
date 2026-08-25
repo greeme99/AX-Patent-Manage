@@ -65,6 +65,37 @@ describe('DemoService integration', () => {
     });
   });
 
+  it('returns a canonical approval snapshot manifest with a verifiable SHA-256 digest', async () => {
+    const opened = await service.openSession();
+    const project = (await service.listProjects(opened.cookie))[0];
+
+    const manifest = await service.createApprovalPackage(opened.cookie, project.id);
+    const { sha256, ...unsignedManifest } = manifest;
+
+    expect(manifest).toMatchObject({
+      format: 'patent-gate-demo/approval-snapshot-v1',
+      project: { code: 'FPCB-EV-BMS-001' },
+      watermark: '교육용 데모 — 법적 전자서명 아님',
+    });
+    expect(sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(await service.createApprovalPackage(opened.cookie, project.id)).toEqual(manifest);
+    expect(sha256).toBe((await import('node:crypto')).createHash('sha256')
+      .update(JSON.stringify(unsignedManifest)).digest('hex'));
+  });
+
+  it('removes expired demo sessions and their synthetic project state', async () => {
+    const expired = await service.openSession();
+    const active = await service.openSession();
+    await database.db.update(demoSessions).set({ expiresAt: new Date('2026-08-25T02:59:59.999Z') })
+      .where(eq(demoSessions.id, expired.session.id));
+
+    expect(await service.cleanupExpiredSessions()).toEqual({ deletedSessions: 1 });
+    expect(await database.db.select().from(demoSessions)).toHaveLength(1);
+    expect((await database.db.select().from(projects)).map((project) => project.sessionId))
+      .toEqual([active.session.id]);
+    await expect(service.listProjects(expired.cookie)).rejects.toMatchObject({ code: 'SESSION_NOT_FOUND' });
+  });
+
   it('rejects a lazily discovered expired session', async () => {
     const opened = await service.openSession();
     const expiredService = new DemoService(new DrizzleDemoRepository(database), {

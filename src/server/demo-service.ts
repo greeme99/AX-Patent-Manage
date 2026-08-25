@@ -1,4 +1,4 @@
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
 import {
   ROLES,
@@ -346,6 +346,57 @@ export class DemoService {
     const session = await this.resolveSession(cookie);
     if (projectId) await this.requireProject(this.repository, session.id, projectId);
     return this.repository.listApprovals(session.id, projectId);
+  }
+
+  async createApprovalPackage(cookie: string, projectId: string) {
+    const session = await this.resolveSession(cookie);
+    const project = await this.requireProject(this.repository, session.id, projectId);
+    const [gates, claims, risks, approvals] = await Promise.all([
+      this.repository.listGates(session.id, project.id),
+      this.repository.listClaims(session.id, project.id),
+      this.repository.listRisks(session.id, project.id),
+      this.repository.listApprovals(session.id, project.id),
+    ]);
+    const unsignedManifest = {
+      format: 'patent-gate-demo/approval-snapshot-v1',
+      project: {
+        code: project.code,
+        name: project.name,
+        product: project.product,
+        phase: project.phase,
+        currentRevisionLabel: project.currentRevisionLabel,
+        productionDate: project.productionDate,
+        launchDate: project.launchDate,
+        legalStatusCheckedAt: project.legalStatusCheckedAt,
+      },
+      gates: gates.sort((a, b) => a.phase.localeCompare(b.phase)).map((gate) => ({
+        phase: gate.phase, status: gate.status,
+      })),
+      claimElements: claims.sort((a, b) => a.label.localeCompare(b.label)).map((claim) => ({
+        label: claim.label, status: claim.status, evidenceCount: claim.evidenceIds.length,
+      })),
+      risks: risks.sort((a, b) => a.title.localeCompare(b.title)).map((risk) => ({
+        level: risk.level, title: risk.title, status: risk.status,
+      })),
+      approvals: approvals.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.role.localeCompare(b.role))
+        .map((approval) => ({
+          role: approval.role,
+          decision: approval.decision,
+          reason: approval.reason ?? null,
+          approvedAt: approval.createdAt.toISOString(),
+        })),
+      watermark: '교육용 데모 — 법적 전자서명 아님',
+    };
+    return {
+      ...unsignedManifest,
+      sha256: createHash('sha256').update(JSON.stringify(unsignedManifest)).digest('hex'),
+    };
+  }
+
+  async cleanupExpiredSessions() {
+    return { deletedSessions: await this.repository.transaction(
+      (repository) => repository.deleteExpiredSessions(this.now()),
+    ) };
   }
 
   async startPhase(

@@ -51,6 +51,7 @@ export interface DemoRepository {
   insertSession(value: SessionInsert): Promise<SessionRecord>;
   retireSession(id: string, expectedVersion: number, now: Date): Promise<SessionRecord | null>;
   updateSessionRole(id: string, expectedVersion: number, role: string, now: Date): Promise<SessionRecord | null>;
+  deleteExpiredSessions(now: Date): Promise<number>;
   insertSyntheticClone(value: SyntheticCloneInsert): Promise<void>;
   listProjects(sessionId: string): Promise<ProjectRecord[]>;
   findProject(sessionId: string, projectId: string): Promise<ProjectRecord | null>;
