@@ -364,4 +364,15 @@ describe('HTTP API contract', () => {
       sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
   });
+
+  it('replaces a retired or tampered session cookie with a fresh bootstrap context', async () => {
+    const response = await api.demoSession(new Request('http://demo.test/api/demo/session', {
+      headers: { cookie: 'demo_session=not-a-valid-signature' },
+    }));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ session: null, demoAuth: true });
+    expect(response.headers.get('set-cookie')).toContain('demo_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax');
+    expect(response.headers.get('set-cookie')).toContain('demo_bootstrap=');
+  });
 });

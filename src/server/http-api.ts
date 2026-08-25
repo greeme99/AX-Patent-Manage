@@ -12,6 +12,13 @@ const approvalSchema = z.object({
   reason: z.string().min(1).optional(),
   version: z.number().int().positive(),
 }).strict();
+const claimUpdateSchema = z.object({
+  status: z.enum(CLAIM_ELEMENT_STATUSES), evidenceIds: z.array(z.string().uuid()), version: z.number().int().positive(),
+}).strict();
+const conditionalApprovalSchema = z.object({
+  projectId: z.string().uuid().optional(), gateId: z.string().uuid(), approvalId: z.string().uuid(), riskId: z.string().uuid(),
+  description: z.string().min(1), dueDate: z.string().datetime(), version: z.number().int().positive(),
+}).strict();
 const createVersion = z.literal(0);
 
 const resourceSchemas: Record<ResourceName, ZodTypeAny> = {
@@ -34,7 +41,8 @@ const resourceSchemas: Record<ResourceName, ZodTypeAny> = {
   }).strict(),
   evidence: z.object({
     projectId: z.string().uuid().optional(), claimElementId: z.string().uuid().optional(), sourceUrl: z.string().url().optional(),
-    quote: z.string().min(1), revision: z.number().int().positive(), version: createVersion,
+    quote: z.string().min(1), revision: z.number().int().positive(), claimVersion: z.number().int().positive().optional(),
+    claimStatus: z.enum(CLAIM_ELEMENT_STATUSES).optional(), version: createVersion,
   }).strict(),
   risks: z.object({
     projectId: z.string().uuid().optional(), level: z.enum(RISK_LEVELS), title: z.string().min(1),
@@ -124,10 +132,13 @@ export function createHttpApi(service: DemoService) {
     demoSession: (request: Request) => respond(async () => {
       if (request.method === 'GET') {
         const result = await service.readSession(request.headers.get('cookie') ?? undefined);
+        const headers = new Headers();
+        if (result.clearSessionCookie) headers.append('set-cookie', result.clearSessionCookie);
+        if (result.bootstrapCookie) headers.append('set-cookie', result.bootstrapCookie);
         return json(
           { session: result.session, demoAuth: result.demoAuth },
           200,
-          result.bootstrapCookie ? { 'set-cookie': result.bootstrapCookie } : undefined,
+          headers,
         );
       }
       const key = idempotencyKey(request);
@@ -199,6 +210,14 @@ export function createHttpApi(service: DemoService) {
       return createResource(request, name, projectId);
     }),
 
+    claim: (request: Request, projectId: string, claimId: string) => respond(async () => {
+      const key = idempotencyKey(request);
+      const input = await body(request, claimUpdateSchema);
+      return json(await service.updateClaim(cookie(request), {
+        projectId, claimElementId: claimId, ...input,
+      }, key));
+    }),
+
     approvals: (request: Request) => respond(async () => {
       if (request.method === 'GET') {
         return json({ data: await service.listApprovals(cookie(request)), demoAuth: true });
@@ -233,6 +252,15 @@ export function createHttpApi(service: DemoService) {
       return json(await service.recordRevisionImpact(
         cookie(request), { ...input, projectId }, key,
       ));
+    }),
+
+    conditionalApproval: (request: Request, projectId: string) => respond(async () => {
+      const key = idempotencyKey(request);
+      const input = await body(request, conditionalApprovalSchema);
+      if (input.projectId !== undefined && input.projectId !== projectId) {
+        throw new ApiError('PROJECT_ID_MISMATCH', 400, 'Body projectId must match the route');
+      }
+      return json(await service.createConditionalApproval(cookie(request), { ...input, projectId }, key), 201);
     }),
 
     approvalPackage: (request: Request, projectId: string) => respond(async () => {

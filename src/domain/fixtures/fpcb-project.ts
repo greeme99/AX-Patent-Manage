@@ -78,10 +78,7 @@ export const syntheticFpcbProject: SyntheticFpcbProject = {
       id: 'b8e4c4b1-f4c6-4d02-8b44-1206ef4dc011',
       phase: 'PLANNING',
       status: 'APPROVED',
-      linkedRevisionIds: [
-        'b8e4c4b1-f4c6-4d02-8b44-1206ef4dc003',
-        'b8e4c4b1-f4c6-4d02-8b44-1206ef4dc002',
-      ],
+      linkedRevisionIds: ['b8e4c4b1-f4c6-4d02-8b44-1206ef4dc003'],
     },
     {
       id: 'b8e4c4b1-f4c6-4d02-8b44-1206ef4dc012',
@@ -99,7 +96,7 @@ export const syntheticFpcbProject: SyntheticFpcbProject = {
       id: 'b8e4c4b1-f4c6-4d02-8b44-1206ef4dc014',
       phase: 'APPROVAL',
       status: 'NOT_READY',
-      linkedRevisionIds: ['b8e4c4b1-f4c6-4d02-8b44-1206ef4dc002'],
+      linkedRevisionIds: ['b8e4c4b1-f4c6-4d02-8b44-1206ef4dc003'],
     },
   ],
   claimElements: [

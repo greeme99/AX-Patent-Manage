@@ -32,6 +32,23 @@ describe('demo client API', () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it('만료 세션 GET이 401이면 새 bootstrap을 받아 version 0 세션을 복구한다', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'expired' } }), { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ session: null }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        session: { id: 'recovered', role: 'PRACTITIONER', version: 1 },
+      }), { status: 201 }));
+
+    const result = await ensureDemoSession(fetcher, () => 'recovery-key');
+
+    expect(result.session.id).toBe('recovered');
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher).toHaveBeenLastCalledWith('/api/demo/session', expect.objectContaining({
+      method: 'POST', body: JSON.stringify({ version: 0 }),
+    }));
+  });
+
   it('역할 전환 요청에 선택 역할과 현재 version을 포함한다', async () => {
     const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       data: { id: 'session-1', role: 'IP_LEGAL', version: 3 },

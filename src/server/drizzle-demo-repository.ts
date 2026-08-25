@@ -167,10 +167,35 @@ export class DrizzleDemoRepository implements DemoRepository {
     return record ?? null;
   }
 
+  async updateProjectVersion(id: string, expectedVersion: number, now: Date): Promise<ProjectRecord | null> {
+    const [record] = await this.query.update(projects).set({
+      version: expectedVersion + 1, updatedAt: now,
+    }).where(and(eq(projects.id, id), eq(projects.version, expectedVersion))).returning();
+    return record ?? null;
+  }
+
   listClaims(sessionId: string, projectId: string): Promise<ClaimRecord[]> {
     return this.query.select().from(claimElements).where(and(
       eq(claimElements.sessionId, sessionId), eq(claimElements.projectId, projectId),
     ));
+  }
+
+  async findClaim(sessionId: string, projectId: string, claimId: string): Promise<ClaimRecord | null> {
+    const [record] = await this.query.select().from(claimElements).where(and(
+      eq(claimElements.sessionId, sessionId), eq(claimElements.projectId, projectId), eq(claimElements.id, claimId),
+    )).limit(1);
+    return record ?? null;
+  }
+
+  async updateClaim(
+    id: string,
+    expectedVersion: number,
+    patch: { status: string; evidenceIds: string[]; version: number; updatedAt: Date },
+  ): Promise<ClaimRecord | null> {
+    const [record] = await this.query.update(claimElements).set(patch).where(and(
+      eq(claimElements.id, id), eq(claimElements.version, expectedVersion),
+    )).returning();
+    return record ?? null;
   }
 
   listRisks(sessionId: string, projectId: string): Promise<RiskRecord[]> {

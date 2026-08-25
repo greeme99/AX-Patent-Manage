@@ -69,7 +69,12 @@ export interface DemoRepository {
     phase: string,
     now: Date,
   ): Promise<ProjectRecord | null>;
+  updateProjectVersion(id: string, expectedVersion: number, now: Date): Promise<ProjectRecord | null>;
   listClaims(sessionId: string, projectId: string): Promise<ClaimRecord[]>;
+  findClaim(sessionId: string, projectId: string, claimId: string): Promise<ClaimRecord | null>;
+  updateClaim(id: string, expectedVersion: number, patch: {
+    status: string; evidenceIds: string[]; version: number; updatedAt: Date;
+  }): Promise<ClaimRecord | null>;
   listRisks(sessionId: string, projectId: string): Promise<RiskRecord[]>;
   listApprovals(sessionId: string, projectId?: string, gateId?: string): Promise<ApprovalRecord[]>;
   insertApproval(value: ApprovalInsert): Promise<ApprovalRecord>;

@@ -19,11 +19,11 @@ async function parseOrThrow<T>(response: Response): Promise<T> {
 }
 
 export async function ensureDemoSession(fetcher: Fetcher, keyFactory: KeyFactory) {
-  const existingResponse = await fetcher('/api/demo/session', {
-    method: 'GET',
-    cache: 'no-store',
-    credentials: 'same-origin',
+  const getSession = () => fetcher('/api/demo/session', {
+    method: 'GET', cache: 'no-store', credentials: 'same-origin',
   });
+  let existingResponse = await getSession();
+  if (existingResponse.status === 401) existingResponse = await getSession();
   const existing = await parseOrThrow<{ session: DemoSessionView | null }>(existingResponse);
   if (existing.session) return { session: existing.session };
 

@@ -14,7 +14,7 @@ describe('synthetic FPCB fixture', () => {
       ...syntheticFpcbProject.risks.map((risk) => risk.id),
     ];
 
-    expect(ids).toHaveLength(15);
+    expect(ids).toHaveLength(14);
     expect(new Set(ids)).toHaveLength(11);
     for (const id of ids) expect(id).toMatch(uuidPattern);
   });

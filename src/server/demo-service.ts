@@ -4,6 +4,7 @@ import {
   ROLES,
   assessGateReadiness,
   canStartPhase,
+  evaluateConditionalApproval,
   markLinkedGatesStale,
   syntheticFpcbProject,
   type ClaimElementStatus,
@@ -44,6 +45,7 @@ export class ApiError extends Error {
 interface ServiceOptions {
   secret: string;
   now?: () => Date;
+  secureCookies?: boolean;
 }
 
 interface MutationResult<T> {
@@ -87,8 +89,18 @@ export class DemoService {
         bootstrapCookie: this.serializeBootstrapCookie(this.bootstrapIdentity(cookie)),
       };
     }
-    const session = await this.resolveSession(cookie ?? '');
-    return { session: this.publicSession(session), demoAuth: true as const };
+    try {
+      const session = await this.resolveSession(cookie ?? '');
+      return { session: this.publicSession(session), demoAuth: true as const };
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 401) throw error;
+      return {
+        session: null,
+        demoAuth: true as const,
+        bootstrapCookie: this.serializeBootstrapCookie(this.bootstrapIdentity(cookie)),
+        clearSessionCookie: this.clearCookie(SESSION_COOKIE),
+      };
+    }
   }
 
   async createDemoSession(key: string, cookie?: string): Promise<SessionResult> {
@@ -104,7 +116,7 @@ export class DemoService {
       const session = await this.createSession(repository);
       const result = {
         ...this.sessionResult(session),
-        bootstrapCookie: `${BOOTSTRAP_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax`,
+        bootstrapCookie: this.clearCookie(BOOTSTRAP_COOKIE),
       };
       const now = this.now();
       await repository.insertAudit({
@@ -192,6 +204,20 @@ export class DemoService {
     key: string,
   ): Promise<MutationResult<unknown>> {
     const session = await this.resolveSession(cookie);
+    if (resource === 'evidence' && body.claimElementId) {
+      if (!Number.isInteger(body.claimVersion) || Number(body.claimVersion) < 1) {
+        throw new ApiError('VALIDATION_ERROR', 400, 'claimVersion is required when linking evidence');
+      }
+      return this.attachClaimEvidence(cookie, {
+        projectId: String(body.projectId),
+        claimElementId: String(body.claimElementId),
+        claimVersion: Number(body.claimVersion),
+        status: body.claimStatus as ClaimElementStatus | undefined,
+        quote: String(body.quote),
+        revision: Number(body.revision),
+        sourceUrl: body.sourceUrl ? String(body.sourceUrl) : undefined,
+      }, key);
+    }
     const operation = body.projectId
       ? `/api/projects/${String(body.projectId)}/${resource}`
       : `/api/${resource}`;
@@ -256,12 +282,28 @@ export class DemoService {
       const gate = await repository.findGate(session.id, body.projectId, body.gateId);
       if (!project || !gate) throw new ApiError('NOT_FOUND', 404, 'Project or gate not found');
       if (gate.version !== body.version) this.conflict(gate);
-
+      if (gate.phase !== project.phase) {
+        throw new ApiError('GATE_PHASE_NOT_CURRENT', 422, 'Only the current phase gate can be approved');
+      }
+      const gates = await repository.listGates(session.id, project.id);
+      const phaseIndex = ['PLANNING', 'DESIGN', 'TEST', 'APPROVAL'].indexOf(gate.phase);
+      if (gates.some((candidate) => ['PLANNING', 'DESIGN', 'TEST', 'APPROVAL'].indexOf(candidate.phase) < phaseIndex && candidate.status !== 'APPROVED')) {
+        throw new ApiError('PREVIOUS_PHASE_NOT_APPROVED', 422, 'Previous phase must be approved');
+      }
       const prior = await repository.listApprovals(session.id, undefined, gate.id);
       if (prior.some(
         (approval) => approval.role === 'IP_LEGAL' && approval.decision === 'REJECTED',
       )) {
         throw new ApiError('LEGAL_REJECTION_FINAL', 422, 'Legal rejection cannot be overridden');
+      }
+      if (session.role === 'TEAM_LEAD' && gate.status === 'READY_FOR_REVIEW') {
+        throw new ApiError('IP_LEGAL_APPROVAL_REQUIRED', 422, 'IP Legal approval must precede Team Lead approval');
+      }
+      if (
+        (session.role === 'IP_LEGAL' && gate.status !== 'READY_FOR_REVIEW') ||
+        (session.role === 'TEAM_LEAD' && gate.status !== 'IN_REVIEW')
+      ) {
+        throw new ApiError('GATE_TRANSITION_INVALID', 422, 'Gate is not in a state for this decision');
       }
 
       const projectRisks = await repository.listRisks(session.id, project.id);
@@ -338,7 +380,84 @@ export class DemoService {
       await this.audit(
         repository, session.id, `GATE_${body.decision}`, 'approval', approval.id, null, approval,
       );
-      return { approval, gateVersion: updatedGate.version };
+      return { approval, gateVersion: updatedGate.version, gateStatus: updatedGate.status };
+    });
+  }
+
+  async updateClaim(
+    cookie: string,
+    body: { projectId: string; claimElementId: string; status: ClaimElementStatus; evidenceIds: string[]; version: number },
+    key: string,
+  ) {
+    const session = await this.resolveSession(cookie);
+    return this.mutate(session.id, `/api/projects/${body.projectId}/claim-charts/${body.claimElementId}`, key, async (repository) => {
+      await this.requireProject(repository, session.id, body.projectId);
+      const claim = await repository.findClaim(session.id, body.projectId, body.claimElementId);
+      if (!claim) throw new ApiError('NOT_FOUND', 404, 'Claim element not found');
+      if (claim.version !== body.version) this.conflict(claim);
+      const updated = await repository.updateClaim(claim.id, claim.version, {
+        status: body.status, evidenceIds: body.evidenceIds, version: claim.version + 1, updatedAt: this.now(),
+      });
+      if (!updated) this.conflict(claim);
+      await this.audit(repository, session.id, 'CLAIM_UPDATED', 'claim_element', claim.id, claim, updated);
+      return updated;
+    });
+  }
+
+  async attachClaimEvidence(
+    cookie: string,
+    body: { projectId: string; claimElementId: string; claimVersion: number; status?: ClaimElementStatus; quote: string; revision: number; sourceUrl?: string },
+    key: string,
+  ) {
+    const session = await this.resolveSession(cookie);
+    return this.mutate(session.id, `/api/projects/${body.projectId}/evidence/claim/${body.claimElementId}`, key, async (repository) => {
+      await this.requireProject(repository, session.id, body.projectId);
+      const claim = await repository.findClaim(session.id, body.projectId, body.claimElementId);
+      if (!claim) throw new ApiError('NOT_FOUND', 404, 'Claim element not found');
+      if (claim.version !== body.claimVersion) this.conflict(claim);
+      const evidence = await repository.insertResource('evidence', session.id, {
+        projectId: body.projectId, claimElementId: claim.id, quote: body.quote, revision: body.revision, sourceUrl: body.sourceUrl,
+      }, this.now());
+      const updated = await repository.updateClaim(claim.id, claim.version, {
+        status: body.status ?? claim.status,
+        evidenceIds: [...claim.evidenceIds, evidence.id],
+        version: claim.version + 1,
+        updatedAt: this.now(),
+      });
+      if (!updated) this.conflict(claim);
+      await this.audit(repository, session.id, 'CLAIM_EVIDENCE_ATTACHED', 'claim_element', claim.id, claim, { claim: updated, evidence });
+      return { claim: updated, evidence };
+    });
+  }
+
+  async createConditionalApproval(
+    cookie: string,
+    body: { projectId: string; gateId: string; approvalId: string; riskId: string; description: string; dueDate: string; version: number },
+    key: string,
+  ) {
+    const session = await this.resolveSession(cookie);
+    if (session.role !== 'IP_LEGAL') throw new ApiError('ROLE_NOT_ALLOWED', 403, 'Only IP Legal may set conditional approval');
+    return this.mutate(session.id, `/api/projects/${body.projectId}/conditions/${body.gateId}`, key, async (repository) => {
+      const project = await this.requireProject(repository, session.id, body.projectId);
+      const gate = await repository.findGate(session.id, project.id, body.gateId);
+      const approvals = await repository.listApprovals(session.id, project.id, body.gateId);
+      const risks = await repository.listRisks(session.id, project.id);
+      const approval = approvals.find((value) => value.id === body.approvalId);
+      const risk = risks.find((value) => value.id === body.riskId);
+      if (!gate || !approval || !risk) throw new ApiError('NOT_FOUND', 404, 'Conditional approval target not found');
+      if (gate.version !== body.version) this.conflict(gate);
+      if (approval.role !== 'IP_LEGAL' || approval.decision !== 'APPROVED' || gate.status !== 'IN_REVIEW') {
+        throw new ApiError('GATE_TRANSITION_INVALID', 422, 'Conditional approval requires the active IP Legal review');
+      }
+      const evaluation = evaluateConditionalApproval({ riskLevel: risk.level as RiskLevel, dueDate: body.dueDate, productionDate: project.productionDate ?? undefined, launchDate: project.launchDate ?? undefined, now: this.now() });
+      if (!evaluation.allowed) throw new ApiError('CONDITIONAL_APPROVAL_NOT_ALLOWED', 422, 'Conditional approval is not allowed', undefined, { blocker: evaluation.blocker });
+      const condition = await repository.insertResource('conditions', session.id, {
+        projectId: project.id, approvalId: approval.id, description: body.description, dueDate: body.dueDate,
+      }, this.now());
+      const updatedGate = await repository.updateGate(gate.id, gate.version, { status: 'CONDITIONAL', version: gate.version + 1, updatedAt: this.now() });
+      if (!updatedGate) this.conflict(gate);
+      await this.audit(repository, session.id, 'GATE_CONDITIONAL', 'condition', condition.id, gate, { condition, gate: updatedGate });
+      return { condition, gateVersion: updatedGate.version, gateStatus: updatedGate.status };
     });
   }
 
@@ -411,17 +530,29 @@ export class DemoService {
       const project = await this.requireProject(repository, session.id, projectId);
       if (project.version !== body.version) this.conflict(project);
       const gates = await repository.listGates(session.id, project.id);
+      const phases: Phase[] = ['PLANNING', 'DESIGN', 'TEST', 'APPROVAL'];
+      if (phases.indexOf(phase) !== phases.indexOf(project.phase as Phase) + 1) {
+        throw new ApiError('PHASE_TRANSITION_INVALID', 422, 'Phase must start immediately after the current phase');
+      }
       if (!canStartPhase(phase, gates as Parameters<typeof canStartPhase>[1])) {
         throw new ApiError('PREVIOUS_PHASE_NOT_APPROVED', 422, 'Previous phase must be approved');
+      }
+      const targetGate = gates.find((gate) => gate.phase === phase);
+      if (!targetGate || targetGate.status !== 'NOT_READY') {
+        throw new ApiError('GATE_TRANSITION_INVALID', 422, 'Target gate is not ready to start');
       }
       const updated = await repository.updateProjectPhase(
         project.id, body.version, phase, this.now(),
       );
       if (!updated) this.conflict(project);
+      const updatedGate = await repository.updateGate(targetGate.id, targetGate.version, {
+        status: 'READY_FOR_REVIEW', version: targetGate.version + 1, updatedAt: this.now(),
+      });
+      if (!updatedGate) this.conflict(targetGate);
       await this.audit(
         repository, session.id, 'PHASE_STARTED', 'project', project.id, project, updated,
       );
-      return updated;
+      return { ...updated, startedGate: updatedGate };
     });
   }
 
@@ -453,10 +584,13 @@ export class DemoService {
             updatedAt: this.now(),
           });
         }
+        const updatedProject = await repository.updateProjectVersion(project.id, project.version, this.now());
+        if (!updatedProject) this.conflict(project);
         const result = {
           projectId: project.id,
           changedRevisionId: body.changedRevisionId,
           affectedGateIds: affected.map((gate) => gate.id),
+          projectVersion: updatedProject.version,
         };
         await this.audit(
           repository, session.id, 'REVISION_IMPACT_RECORDED', 'project',
@@ -498,7 +632,9 @@ export class DemoService {
       },
       gates: syntheticFpcbProject.gates.map((gate) => ({
         id: randomUUID(), sessionId, projectId, phase: gate.phase, status: gate.status,
-        linkedRevisionIds: gate.linkedRevisionIds.map(() => revisionId),
+        linkedRevisionIds: gate.linkedRevisionIds.map((sourceRevisionId) =>
+          sourceRevisionId === syntheticFpcbProject.currentRevisionId ? revisionId : randomUUID(),
+        ),
         version: 1, createdAt: now, updatedAt: now,
       })),
       claims: syntheticFpcbProject.claimElements.map((element, index) => ({
@@ -559,7 +695,7 @@ export class DemoService {
 
   private serializeBootstrapCookie(identity: { bid: string; exp: number }): string {
     const encoded = Buffer.from(JSON.stringify(identity), 'utf8').toString('base64url');
-    return `${BOOTSTRAP_COOKIE}=${encoded}.${this.sign(encoded)}; Max-Age=600; Path=/; HttpOnly; SameSite=Lax`;
+    return `${BOOTSTRAP_COOKIE}=${encoded}.${this.sign(encoded)}; Max-Age=600; Path=/; HttpOnly; SameSite=Lax${this.secureAttribute()}`;
   }
 
   private verifyBootstrapToken(token: string): { bid: string; exp: number } {
@@ -619,7 +755,15 @@ export class DemoService {
     const encoded = Buffer.from(JSON.stringify({
       sid: session.id, exp: session.expiresAt.getTime(),
     }), 'utf8').toString('base64url');
-    return `${SESSION_COOKIE}=${encoded}.${this.sign(encoded)}; Max-Age=86400; Path=/; HttpOnly; SameSite=Lax`;
+    return `${SESSION_COOKIE}=${encoded}.${this.sign(encoded)}; Max-Age=86400; Path=/; HttpOnly; SameSite=Lax${this.secureAttribute()}`;
+  }
+
+  private clearCookie(name: string): string {
+    return `${name}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax${this.secureAttribute()}`;
+  }
+
+  private secureAttribute(): string {
+    return this.options.secureCookies ? '; Secure' : '';
   }
 
   private sessionResult(session: SessionRecord): SessionResult {

@@ -1,11 +1,12 @@
 import { mkdtemp, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 
 import { createDatabase, type AppDatabase } from './db/client';
-import { approvals, auditEvents, claimElements, demoSessions, phaseGates, projects } from './db/schema';
+import { approvals, auditEvents, claimElements, demoSessions, phaseGates, projects, risks } from './db/schema';
 import { ApiError, DemoService } from './demo-service';
 import { DrizzleDemoRepository } from './drizzle-demo-repository';
 
@@ -49,6 +50,19 @@ describe('DemoService integration', () => {
       phase: 'DESIGN',
       version: 1,
     });
+  });
+
+  it('marks production session and bootstrap cookies Secure', async () => {
+    const production = new DemoService(new DrizzleDemoRepository(database), {
+      secret: 'integration-test-secret-at-least-32-characters',
+      secureCookies: true,
+      now: () => NOW,
+    });
+    const bootstrap = await production.readSession();
+    const session = await production.openSession();
+
+    expect(bootstrap.bootstrapCookie).toContain('Secure');
+    expect(session.cookie).toContain('Secure');
   });
 
   it('isolates every query by session id', async () => {
@@ -364,20 +378,24 @@ describe('DemoService integration', () => {
   it('scopes the same approval idempotency key to its target gate', async () => {
     const opened = await service.openSession();
     const project = (await service.listProjects(opened.cookie))[0];
-    const gates = (await database.db.select().from(phaseGates)).filter(
-      (candidate) => candidate.sessionId === opened.session.id,
-    );
+    const gate = (await database.db.select().from(phaseGates)).find(
+      (candidate) => candidate.sessionId === opened.session.id && candidate.phase === 'DESIGN',
+    )!;
+    const secondProject = { ...project, id: randomUUID(), code: 'FPCB-EV-BMS-002', currentRevisionId: randomUUID() };
+    const secondGate = { ...gate, id: randomUUID(), projectId: secondProject.id };
+    await database.db.insert(projects).values(secondProject);
+    await database.db.insert(phaseGates).values(secondGate);
     await database.db.update(claimElements).set({ status: 'ABSENT', evidenceIds: [] });
     await service.switchRole(opened.cookie, { role: 'IP_LEGAL', version: 1 }, 'legal-role');
     const first = await service.createApproval(opened.cookie, {
-      gateId: gates[1].id, projectId: project.id, decision: 'APPROVED', version: gates[1].version,
+      gateId: gate.id, projectId: project.id, decision: 'APPROVED', version: gate.version,
     }, 'shared-approval-key');
     const second = await service.createApproval(opened.cookie, {
-      gateId: gates[2].id, projectId: project.id, decision: 'APPROVED', version: gates[2].version,
+      gateId: secondGate.id, projectId: secondProject.id, decision: 'APPROVED', version: secondGate.version,
     }, 'shared-approval-key');
 
-    expect(first.data.approval.gateId).toBe(gates[1].id);
-    expect(second.data.approval.gateId).toBe(gates[2].id);
+    expect(first.data.approval.gateId).toBe(gate.id);
+    expect(second.data.approval.gateId).toBe(secondGate.id);
     expect(await database.db.select().from(approvals)).toHaveLength(2);
   });
 
@@ -400,8 +418,9 @@ describe('DemoService integration', () => {
     );
 
     expect(replay).toEqual(first);
-    expect(first.data.affectedGateIds).toHaveLength(4);
-    expect(gates.every((gate) => gate.status === 'STALE' && gate.version === 2)).toBe(true);
+    expect(first.data.affectedGateIds).toHaveLength(2);
+    expect(gates.filter((gate) => first.data.affectedGateIds.includes(gate.id))
+      .every((gate) => gate.status === 'STALE' && gate.version === 2)).toBe(true);
     expect((await database.db.select().from(auditEvents)).filter(
       (event) => event.action === 'REVISION_IMPACT_RECORDED',
     )).toHaveLength(1);
@@ -434,5 +453,87 @@ describe('DemoService integration', () => {
 
     const sessions = await database.db.select().from(demoSessions);
     expect(sessions).toEqual([]);
+  });
+
+  it('resolves a seeded UNKNOWN claim by saving its decision and evidence together', async () => {
+    const opened = await service.openSession();
+    const project = (await service.listProjects(opened.cookie))[0];
+    const claim = (await database.db.select().from(claimElements)).find(
+      (candidate) => candidate.sessionId === opened.session.id && candidate.status === 'UNKNOWN',
+    )!;
+
+    const result = await service.attachClaimEvidence(opened.cookie, {
+      projectId: project.id, claimElementId: claim.id, status: 'ABSENT', claimVersion: claim.version,
+      quote: 'R03 단면에서 수지 충전 blind via는 굴곡 경계 밖에 배치됨', revision: 3,
+    }, 'resolve-unknown-claim');
+
+    expect(result.data.claim).toMatchObject({ id: claim.id, status: 'ABSENT', version: 2 });
+    expect(result.data.claim.evidenceIds).toHaveLength(1);
+    expect((await database.db.select().from(auditEvents)).filter(
+      (event) => event.action === 'CLAIM_EVIDENCE_ATTACHED',
+    )).toHaveLength(1);
+    await expect(service.attachClaimEvidence(opened.cookie, {
+      projectId: project.id, claimElementId: claim.id, status: 'ABSENT', claimVersion: claim.version,
+      quote: 'stale', revision: 3,
+    }, 'resolve-unknown-claim-stale')).rejects.toMatchObject({ code: 'VERSION_CONFLICT', status: 409 });
+  });
+
+  it('allows approval only for the current phase and the IP Legal then Team Lead transition', async () => {
+    const opened = await service.openSession();
+    const project = (await service.listProjects(opened.cookie))[0];
+    const gates = (await database.db.select().from(phaseGates)).filter((gate) => gate.sessionId === opened.session.id);
+    const design = gates.find((gate) => gate.phase === 'DESIGN')!;
+    const test = gates.find((gate) => gate.phase === 'TEST')!;
+    await database.db.update(claimElements).set({ status: 'ABSENT', evidenceIds: [] });
+    await service.switchRole(opened.cookie, { role: 'IP_LEGAL', version: 1 }, 'legal-current-phase');
+
+    await expect(service.createApproval(opened.cookie, {
+      projectId: project.id, gateId: test.id, decision: 'APPROVED', version: test.version,
+    }, 'skip-to-test')).rejects.toMatchObject({ code: 'GATE_PHASE_NOT_CURRENT', status: 422 });
+    const legal = await service.createApproval(opened.cookie, {
+      projectId: project.id, gateId: design.id, decision: 'APPROVED', version: design.version,
+    }, 'legal-design');
+    await expect(service.createApproval(opened.cookie, {
+      projectId: project.id, gateId: design.id, decision: 'APPROVED', version: legal.data.gateVersion,
+    }, 'legal-cannot-overwrite')).rejects.toMatchObject({ code: 'GATE_TRANSITION_INVALID', status: 422 });
+    const lead = await service.switchRole(opened.cookie, { role: 'TEAM_LEAD', version: 2 }, 'lead-design');
+    const final = await service.createApproval(opened.cookie, {
+      projectId: project.id, gateId: design.id, decision: 'APPROVED', version: legal.data.gateVersion,
+    }, 'lead-design');
+    expect(lead.data.role).toBe('TEAM_LEAD');
+    expect(final.data.gateStatus).toBe('APPROVED');
+  });
+
+  it('creates conditional approval only for a same-session medium risk before release', async () => {
+    const opened = await service.openSession();
+    const project = (await service.listProjects(opened.cookie))[0];
+    const gate = (await database.db.select().from(phaseGates)).find((value) => value.sessionId === opened.session.id && value.phase === 'DESIGN')!;
+    const mediumRisk = (await database.db.select().from(risks)).find(
+      (value) => value.sessionId === opened.session.id && value.level === 'MEDIUM',
+    )!;
+    await database.db.update(claimElements).set({ status: 'ABSENT', evidenceIds: [] });
+    await service.switchRole(opened.cookie, { role: 'IP_LEGAL', version: 1 }, 'legal-conditional');
+    const approval = await service.createApproval(opened.cookie, {
+      projectId: project.id, gateId: gate.id, decision: 'APPROVED', version: gate.version,
+    }, 'legal-for-condition');
+
+    const conditional = await service.createConditionalApproval(opened.cookie, {
+      projectId: project.id, gateId: gate.id, approvalId: approval.data.approval.id,
+      riskId: mediumRisk.id, dueDate: '2026-09-18T00:00:00.000Z', description: 'Micro-via 보강 시험 완료',
+      version: approval.data.gateVersion,
+    }, 'conditional-medium');
+    expect(conditional.data.gateStatus).toBe('CONDITIONAL');
+  });
+
+  it('increments the project version when revision impact stales its linked gates', async () => {
+    const opened = await service.openSession();
+    const project = (await service.listProjects(opened.cookie))[0];
+    const result = await service.recordRevisionImpact(opened.cookie, {
+      projectId: project.id, changedRevisionId: project.currentRevisionId, version: project.version,
+    }, 'revision-project-version');
+    expect(result.data).toMatchObject({ projectVersion: 2 });
+    await expect(service.recordRevisionImpact(opened.cookie, {
+      projectId: project.id, changedRevisionId: project.currentRevisionId, version: project.version,
+    }, 'revision-project-version-stale')).rejects.toMatchObject({ code: 'VERSION_CONFLICT', status: 409 });
   });
 });
