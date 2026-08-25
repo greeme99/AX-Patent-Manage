@@ -1,0 +1,14 @@
+node_modules/
+.next/
+coverage/
+playwright-report/
+test-results/
+.env*
+!.env.example
+.worktrees/
+.superpowers/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+*.tsbuildinfo
