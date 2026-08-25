@@ -24,8 +24,9 @@ import type {
 export type { ProjectResourceName, ResourceName } from './demo-repository';
 
 const SESSION_COOKIE = 'demo_session';
+const BOOTSTRAP_COOKIE = 'demo_bootstrap';
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
-const CREATE_SESSION_SCOPE = 'DEMO_SESSION_CREATE';
+const BOOTSTRAP_TTL_MS = 10 * 60 * 1000;
 
 export class ApiError extends Error {
   constructor(
@@ -53,6 +54,7 @@ interface MutationResult<T> {
 interface SessionResult {
   session: ReturnType<DemoService['publicSession']>;
   cookie: string;
+  bootstrapCookie?: string;
   demoAuth: true;
 }
 
@@ -78,21 +80,32 @@ export class DemoService {
   }
 
   async readSession(cookie?: string) {
-    if (!cookie) return { session: null, demoAuth: true as const };
-    const session = await this.resolveSession(cookie);
+    if (!this.optionalCookieValue(cookie, SESSION_COOKIE)) {
+      return {
+        session: null,
+        demoAuth: true as const,
+        bootstrapCookie: this.serializeBootstrapCookie(this.bootstrapIdentity(cookie)),
+      };
+    }
+    const session = await this.resolveSession(cookie ?? '');
     return { session: this.publicSession(session), demoAuth: true as const };
   }
 
-  async createDemoSession(key: string): Promise<SessionResult> {
+  async createDemoSession(key: string, cookie?: string): Promise<SessionResult> {
     if (!key.trim()) throw new ApiError('IDEMPOTENCY_KEY_REQUIRED', 400);
+    const identity = this.requireBootstrapIdentity(cookie);
+    const scope = `BOOTSTRAP:${identity.bid}`;
     return this.repository.transaction(async (repository) => {
       const replay = await repository.findIdempotency(
-        CREATE_SESSION_SCOPE, '/api/demo/session', key,
+        scope, '/api/demo/session', key,
       );
       if (replay) return replay as SessionResult;
 
       const session = await this.createSession(repository);
-      const result = this.sessionResult(session);
+      const result = {
+        ...this.sessionResult(session),
+        bootstrapCookie: `${BOOTSTRAP_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax`,
+      };
       const now = this.now();
       await repository.insertAudit({
         id: randomUUID(), sessionId: session.id, action: 'SESSION_CREATED',
@@ -101,7 +114,7 @@ export class DemoService {
         version: 1, createdAt: now, updatedAt: now,
       });
       await repository.insertIdempotency({
-        id: randomUUID(), sessionId: CREATE_SESSION_SCOPE, route: '/api/demo/session', key,
+        id: randomUUID(), sessionId: scope, route: '/api/demo/session', key,
         status: 201, responseJson: result, version: 1, createdAt: now, updatedAt: now,
       });
       return result;
@@ -463,11 +476,66 @@ export class DemoService {
   }
 
   private cookieValue(cookie: string): string {
-    const value = cookie.split(';').map((part) => part.trim())
-      .find((part) => part.startsWith(`${SESSION_COOKIE}=`))
-      ?.slice(SESSION_COOKIE.length + 1);
+    const value = this.optionalCookieValue(cookie, SESSION_COOKIE);
     if (!value) throw new ApiError('SESSION_REQUIRED', 401, 'Demo session cookie required');
     return value;
+  }
+
+  private optionalCookieValue(cookie: string | undefined, name: string): string | undefined {
+    return cookie?.split(';').map((part) => part.trim())
+      .find((part) => part.startsWith(`${name}=`))
+      ?.slice(name.length + 1);
+  }
+
+  private bootstrapIdentity(cookie?: string): { bid: string; exp: number } {
+    const token = this.optionalCookieValue(cookie, BOOTSTRAP_COOKIE);
+    if (token) {
+      try {
+        const identity = this.verifyBootstrapToken(token);
+        return { bid: identity.bid, exp: this.now().getTime() + BOOTSTRAP_TTL_MS };
+      } catch {
+        // GET replaces invalid/expired stateless bootstrap cookies without a server write.
+      }
+    }
+    return { bid: randomUUID(), exp: this.now().getTime() + BOOTSTRAP_TTL_MS };
+  }
+
+  private requireBootstrapIdentity(cookie?: string): { bid: string; exp: number } {
+    const token = this.optionalCookieValue(cookie, BOOTSTRAP_COOKIE);
+    if (!token) throw new ApiError('BOOTSTRAP_REQUIRED', 401, 'Bootstrap cookie required');
+    return this.verifyBootstrapToken(token);
+  }
+
+  private serializeBootstrapCookie(identity: { bid: string; exp: number }): string {
+    const encoded = Buffer.from(JSON.stringify(identity), 'utf8').toString('base64url');
+    return `${BOOTSTRAP_COOKIE}=${encoded}.${this.sign(encoded)}; Max-Age=600; Path=/; HttpOnly; SameSite=Lax`;
+  }
+
+  private verifyBootstrapToken(token: string): { bid: string; exp: number } {
+    const separator = token.lastIndexOf('.');
+    if (separator < 1) throw new ApiError('INVALID_BOOTSTRAP', 401, 'Invalid bootstrap signature');
+    const encoded = token.slice(0, separator);
+    const supplied = Buffer.from(token.slice(separator + 1));
+    const expected = Buffer.from(this.sign(encoded));
+    if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+      throw new ApiError('INVALID_BOOTSTRAP', 401, 'Invalid bootstrap signature');
+    }
+    try {
+      const parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as unknown;
+      if (
+        typeof parsed !== 'object' || parsed === null ||
+        typeof (parsed as { bid?: unknown }).bid !== 'string' ||
+        typeof (parsed as { exp?: unknown }).exp !== 'number'
+      ) throw new Error('invalid payload');
+      const identity = parsed as { bid: string; exp: number };
+      if (identity.exp <= this.now().getTime()) {
+        throw new ApiError('BOOTSTRAP_EXPIRED', 401, 'Bootstrap cookie expired');
+      }
+      return identity;
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw new ApiError('INVALID_BOOTSTRAP', 401, 'Invalid bootstrap payload');
+    }
   }
 
   private sign(value: string): string {

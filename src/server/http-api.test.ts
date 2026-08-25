@@ -25,9 +25,17 @@ describe('HTTP API contract', () => {
       now: () => new Date('2026-08-25T03:00:00.000Z'),
     });
     api = createHttpApi(service);
+    const bootstrapResponse = await api.demoSession(
+      new Request('http://demo.test/api/demo/session'),
+    );
+    const bootstrapCookie = bootstrapResponse.headers.get('set-cookie')!;
     const response = await api.demoSession(new Request('http://demo.test/api/demo/session', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'idempotency-key': randomUUID() },
+      headers: {
+        cookie: bootstrapCookie,
+        'content-type': 'application/json',
+        'idempotency-key': randomUUID(),
+      },
       body: JSON.stringify({ version: 0 }),
     }));
     cookie = response.headers.get('set-cookie')!;
@@ -49,14 +57,17 @@ describe('HTTP API contract', () => {
     expect(body).toMatchObject({ demoAuth: true, session: { role: 'PRACTITIONER', version: 1 } });
   });
 
-  it('keeps GET demo session read-only when no cookie is present', async () => {
+  it('issues a short-lived HttpOnly bootstrap cookie without persistent mutation', async () => {
     const before = await database.db.select().from(demoSessions);
     const response = await api.demoSession(new Request('http://demo.test/api/demo/session'));
     const after = await database.db.select().from(demoSessions);
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ session: null, demoAuth: true });
-    expect(response.headers.get('set-cookie')).toBeNull();
+    expect(response.headers.get('set-cookie')).toContain('demo_bootstrap=');
+    expect(response.headers.get('set-cookie')).toContain('Max-Age=600');
+    expect(response.headers.get('set-cookie')).toContain('HttpOnly');
+    expect(response.headers.get('set-cookie')).toContain('SameSite=Lax');
     expect(after).toHaveLength(before.length);
   });
 
@@ -69,9 +80,17 @@ describe('HTTP API contract', () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ version: 0 }),
     }));
+    const bootstrapResponse = await api.demoSession(
+      new Request('http://demo.test/api/demo/session'),
+    );
+    const bootstrapCookie = bootstrapResponse.headers.get('set-cookie')!;
     const request = () => new Request('http://demo.test/api/demo/session', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'idempotency-key': 'create-session-2' },
+      headers: {
+        cookie: bootstrapCookie,
+        'content-type': 'application/json',
+        'idempotency-key': 'create-session-2',
+      },
       body: JSON.stringify({ version: 0 }),
     });
 
@@ -85,9 +104,86 @@ describe('HTTP API contract', () => {
     expect(first.headers.get('set-cookie')).toContain('HttpOnly');
     expect(first.headers.get('set-cookie')).toContain('SameSite=Lax');
     expect(first.headers.get('set-cookie')).toContain('Max-Age=86400');
+    expect(first.headers.get('set-cookie')).toContain('demo_bootstrap=; Max-Age=0');
     expect((await database.db.select().from(auditEvents)).filter(
       (event) => event.action === 'SESSION_CREATED',
     )).toHaveLength(auditsBefore + 1);
+  });
+
+  it('isolates the same predictable idempotency key across browser bootstrap contexts', async () => {
+    const bootstrap = async () => {
+      const response = await api.demoSession(new Request('http://demo.test/api/demo/session'));
+      return response.headers.get('set-cookie')!;
+    };
+    const create = (bootstrapCookie: string) => api.demoSession(new Request(
+      'http://demo.test/api/demo/session',
+      {
+        method: 'POST',
+        headers: {
+          cookie: bootstrapCookie,
+          'content-type': 'application/json',
+          'idempotency-key': 'predictable-key',
+        },
+        body: JSON.stringify({ version: 0 }),
+      },
+    ));
+    const firstBootstrap = await bootstrap();
+    const secondBootstrap = await bootstrap();
+
+    const first = await create(firstBootstrap);
+    const second = await create(secondBootstrap);
+    const firstBody = await first.json();
+    const secondBody = await second.json();
+
+    expect(firstBody.session.id).not.toBe(secondBody.session.id);
+    expect(first.headers.get('set-cookie')).not.toBe(second.headers.get('set-cookie'));
+  });
+
+  it('rejects a tampered browser bootstrap cookie', async () => {
+    const bootstrapResponse = await api.demoSession(
+      new Request('http://demo.test/api/demo/session'),
+    );
+    const pair = bootstrapResponse.headers.get('set-cookie')!.split(';')[0];
+    const token = pair.slice('demo_bootstrap='.length);
+    const tampered = `${token.slice(0, -1)}${token.endsWith('A') ? 'B' : 'A'}`;
+    const response = await api.demoSession(new Request('http://demo.test/api/demo/session', {
+      method: 'POST',
+      headers: {
+        cookie: `demo_bootstrap=${tampered}`,
+        'content-type': 'application/json',
+        'idempotency-key': 'tampered-bootstrap',
+      },
+      body: JSON.stringify({ version: 0 }),
+    }));
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toMatchObject({ error: { code: 'INVALID_BOOTSTRAP' } });
+  });
+
+  it('rejects an expired browser bootstrap cookie', async () => {
+    const bootstrapResponse = await api.demoSession(
+      new Request('http://demo.test/api/demo/session'),
+    );
+    const bootstrapCookie = bootstrapResponse.headers.get('set-cookie')!;
+    const expiredApi = createHttpApi(new DemoService(new DrizzleDemoRepository(database), {
+      secret: 'integration-test-secret-at-least-32-characters',
+      now: () => new Date('2026-08-25T03:10:00.001Z'),
+    }));
+    const response = await expiredApi.demoSession(new Request(
+      'http://demo.test/api/demo/session',
+      {
+        method: 'POST',
+        headers: {
+          cookie: bootstrapCookie,
+          'content-type': 'application/json',
+          'idempotency-key': 'expired-bootstrap',
+        },
+        body: JSON.stringify({ version: 0 }),
+      },
+    ));
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toMatchObject({ error: { code: 'BOOTSTRAP_EXPIRED' } });
   });
 
   it('requires an Idempotency-Key and body version for role mutations', async () => {

@@ -123,15 +123,26 @@ export function createHttpApi(service: DemoService) {
   return {
     demoSession: (request: Request) => respond(async () => {
       if (request.method === 'GET') {
-        return json(await service.readSession(request.headers.get('cookie') ?? undefined));
+        const result = await service.readSession(request.headers.get('cookie') ?? undefined);
+        return json(
+          { session: result.session, demoAuth: result.demoAuth },
+          200,
+          result.bootstrapCookie ? { 'set-cookie': result.bootstrapCookie } : undefined,
+        );
       }
       const key = idempotencyKey(request);
       await body(request, z.object({ version: z.literal(0) }).strict());
-      const result = await service.createDemoSession(key);
+      const result = await service.createDemoSession(
+        key,
+        request.headers.get('cookie') ?? undefined,
+      );
+      const responseHeaders = new Headers();
+      responseHeaders.append('set-cookie', result.cookie);
+      if (result.bootstrapCookie) responseHeaders.append('set-cookie', result.bootstrapCookie);
       return json(
         { session: result.session, demoAuth: result.demoAuth },
         201,
-        { 'set-cookie': result.cookie },
+        responseHeaders,
       );
     }),
 
