@@ -5,5 +5,5 @@ import { loadProjectScreen } from '../../../../server/ui-data';
 export default async function RevisionImpactPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const data = await loadProjectScreen(id);
-  return <ProjectShell projectId={id} initialRole={data.role} readOnly={data.readOnly}><RevisionImpact projectId={id} revisionId={data.currentRevisionId} version={data.projectVersion} readOnly={data.readOnly} /></ProjectShell>;
+  return <ProjectShell projectId={id} initialRole={data.role} initialVersion={data.sessionVersion} readOnly={data.readOnly}><RevisionImpact projectId={id} revisionId={data.currentRevisionId} version={data.projectVersion} readOnly={data.readOnly} /></ProjectShell>;
 }

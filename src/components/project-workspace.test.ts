@@ -21,4 +21,14 @@ describe('ProjectWorkspace', () => {
     expect(html).toContain('차단 사유');
     expect(html).toContain('상태:');
   });
+
+  it('승인 단계에서 IP·법무 결정 뒤 개발팀장 최종 승인 순서를 명시한다', () => {
+    const html = renderToStaticMarkup(createElement(ProjectWorkspace, { phase: 'APPROVAL' }));
+
+    expect(html).toContain('aria-label="승인 순서"');
+    expect(html).toContain('1차 결정 · IP·법무');
+    expect(html).toContain('검토 중 · 2026.08.25 14:10');
+    expect(html).toContain('2차 최종 승인 · 개발팀장');
+    expect(html).toContain('선행 승인 대기');
+  });
 });

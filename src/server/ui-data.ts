@@ -6,6 +6,7 @@ import { getHttpApi } from './runtime-api';
 export interface ProjectScreenData {
   projectId: string;
   role: Role;
+  sessionVersion: number;
   readOnly: boolean;
   claimCount: number;
   riskCount: number;
@@ -17,6 +18,7 @@ export async function loadProjectScreen(projectId: string): Promise<ProjectScree
   const fallback: ProjectScreenData = {
     projectId,
     role: 'PRACTITIONER',
+    sessionVersion: 1,
     readOnly: true,
     claimCount: syntheticFpcbProject.claimElements.length,
     riskCount: syntheticFpcbProject.risks.length,
@@ -34,7 +36,7 @@ export async function loadProjectScreen(projectId: string): Promise<ProjectScree
       api.projects(request('/api/projects')),
     ]);
     if (!sessionResponse.ok || !projectsResponse.ok) return fallback;
-    const sessionPayload = await sessionResponse.json() as { session: { role: string } | null };
+    const sessionPayload = await sessionResponse.json() as { session: { role: string; version: number } | null };
     const projectPayload = await projectsResponse.json() as { data: { id: string; currentRevisionId: string; version: number }[] };
     const project = projectPayload.data.find((item) => item.id === projectId);
     if (!project || !sessionPayload.session) return fallback;
@@ -47,7 +49,7 @@ export async function loadProjectScreen(projectId: string): Promise<ProjectScree
     ]);
     const claims = claimsResponse.ok ? await claimsResponse.json() as { data: unknown[] } : { data: syntheticFpcbProject.claimElements as readonly unknown[] };
     const risks = risksResponse.ok ? await risksResponse.json() as { data: unknown[] } : { data: syntheticFpcbProject.risks as readonly unknown[] };
-    return { projectId, role, readOnly: false, claimCount: claims.data.length, riskCount: risks.data.length, currentRevisionId: project.currentRevisionId, projectVersion: project.version };
+    return { projectId, role, sessionVersion: sessionPayload.session.version, readOnly: false, claimCount: claims.data.length, riskCount: risks.data.length, currentRevisionId: project.currentRevisionId, projectVersion: project.version };
   } catch {
     return fallback;
   }

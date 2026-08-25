@@ -15,7 +15,7 @@ export default async function ProjectPage({ params, searchParams }: PageProps) {
   const data = await loadProjectScreen(id);
 
   return (
-    <ProjectShell projectId={id} initialRole={data.role} readOnly={data.readOnly}>
+    <ProjectShell projectId={id} initialRole={data.role} initialVersion={data.sessionVersion} readOnly={data.readOnly}>
       <ProjectWorkspace phase={phase} projectId={id} readOnly={data.readOnly} claimCount={data.claimCount} riskCount={data.riskCount} />
     </ProjectShell>
   );
