@@ -21,7 +21,7 @@ npm run dev
 
 ## 배포
 
-Vercel에서 Git 저장소를 연결하면 `main` push는 Production, pull request는 Preview 배포가 됩니다. Production 환경 변수에는 `DATABASE_URL`, `TURSO_AUTH_TOKEN`, `DEMO_SESSION_SECRET`, `CRON_SECRET`를 설정해야 합니다. 로컬은 `DATABASE_URL`을 생략하면 `file:local.db` SQLite를 사용합니다. `vercel.json`은 매일 만료된 데모 세션을 정리하는 Cron을 등록합니다.
+Vercel에서 Git 저장소를 연결하면 `main` push는 Production, pull request는 Preview 배포가 됩니다. Production 환경 변수에는 `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `DEMO_SESSION_SECRET`, `CRON_SECRET`를 설정해야 합니다. `DATABASE_URL`은 기존 설정과의 호환을 위해 계속 지원합니다. 로컬은 URL을 생략하면 `file:local.db` SQLite를 사용합니다. `vercel.json`은 매일 만료된 데모 세션을 정리하는 Cron을 등록합니다.
 
 ## 범위와 제한
 

@@ -1,0 +1,18 @@
+.DS_Store
+.github
+.superpowers
+docs
+e2e
+phase-1-requirements
+phase-2-design
+phase-3-delivery
+scripts
+test-results
+local.db
+playwright.config.ts
+vitest.config.ts
+**/*.test.ts
+**/*.test.tsx
+00_문서목록_및_추적성.md
+기술특허 관리 업무가이드.md
+특허업무 관리 가이드.markdown
